@@ -45,6 +45,8 @@ pub const ParseError = error{
     MissingHostHeader,
     UnsupportedTransferEncoding,
     ChunkedNotFinalTransferEncoding,
+    DuplicateChunkedTransferEncoding,
+    InvalidTransferEncoding,
     OutOfMemory,
 };
 
@@ -116,14 +118,25 @@ pub fn parseRequestHead(allocator: std.mem.Allocator, buffer: []const u8) ParseE
             // RFC 9112 Section 6.1: Parse comma-separated list of transfer codings
             var te_it = std.mem.splitScalar(u8, val, ',');
             var last_token: ?[]const u8 = null;
+            var chunked_count: usize = 0;
+            var token_count: usize = 0;
             while (te_it.next()) |raw_tok| {
                 const tok = std.mem.trim(u8, raw_tok, " \t");
-                if (tok.len == 0) continue;
+                if (tok.len == 0) {
+                    // Empty token between commas (e.g. "chunked, , chunked") is invalid syntax
+                    return error.InvalidTransferEncoding;
+                }
+                token_count += 1;
                 last_token = tok;
-                // If it's not chunked, check if we understand it; if not, reject
-                if (!std.ascii.eqlIgnoreCase(tok, "chunked")) {
+                if (std.ascii.eqlIgnoreCase(tok, "chunked")) {
+                    chunked_count += 1;
+                } else {
                     return error.UnsupportedTransferEncoding;
                 }
+            }
+            // RFC 9112 Section 6.1: Chunked must not be applied more than once
+            if (chunked_count > 1) {
+                return error.DuplicateChunkedTransferEncoding;
             }
             if (last_token) |last| {
                 if (!std.ascii.eqlIgnoreCase(last, "chunked")) {
@@ -131,7 +144,7 @@ pub fn parseRequestHead(allocator: std.mem.Allocator, buffer: []const u8) ParseE
                 }
                 is_chunked = true;
             } else {
-                return error.UnsupportedTransferEncoding;
+                return error.InvalidTransferEncoding;
             }
         } else if (std.ascii.eqlIgnoreCase(key, "connection")) {
             connection_hdr = val;
@@ -208,4 +221,27 @@ test "parseRequestHead RFC compliance: reject missing host in HTTP/1.1" {
 test "parseRequestHead RFC compliance: reject conflicting Content-Lengths" {
     const raw = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\nContent-Length: 20\r\n\r\n";
     try std.testing.expectError(error.InvalidContentLength, parseRequestHead(std.testing.allocator, raw));
+}
+
+test "parseRequestHead RFC compliance: Transfer-Encoding chunked validation" {
+    const allocator = std.testing.allocator;
+
+    // Reject duplicate chunked tokens
+    const dup_raw = "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked, chunked\r\n\r\n";
+    try std.testing.expectError(error.DuplicateChunkedTransferEncoding, parseRequestHead(allocator, dup_raw));
+
+    // Reject empty tokens like "chunked, , chunked"
+    const empty_raw = "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked, , chunked\r\n\r\n";
+    try std.testing.expectError(error.InvalidTransferEncoding, parseRequestHead(allocator, empty_raw));
+
+    // Reject non-chunked transfer coding as unsupported (RFC 9112 Section 6.1 -> 501 Not Implemented)
+    const not_final = "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked, gzip\r\n\r\n";
+    try std.testing.expectError(error.UnsupportedTransferEncoding, parseRequestHead(allocator, not_final));
+
+    // Accept valid chunked encoding
+    const valid_raw = "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const head = try parseRequestHead(allocator, valid_raw);
+    var h = head.headers;
+    defer h.deinit();
+    try std.testing.expectEqual(true, head.is_chunked);
 }

@@ -19,12 +19,20 @@ pub const ServerOptions = struct {
 };
 
 pub const Server = struct {
+    pub const ConnNode = struct {
+        handle: std.posix.fd_t,
+        prev: ?*ConnNode = null,
+        next: ?*ConnNode = null,
+    };
+
     allocator: std.mem.Allocator,
     io: std.Io,
     options: ServerOptions,
     pool: ?*ThreadPool = null,
     running: std.atomic.Value(bool) = .init(false),
     listener: ?std.Io.net.Server = null,
+    active_conns_head: ?*ConnNode = null,
+    active_conns_mutex: std.Io.Mutex = .init,
 
     pub fn init(allocator: std.mem.Allocator, options: ServerOptions) Server {
         const io = std.Io.Threaded.global_single_threaded.io();
@@ -32,6 +40,8 @@ pub const Server = struct {
             .allocator = allocator,
             .io = io,
             .options = options,
+            .active_conns_head = null,
+            .active_conns_mutex = .init,
         };
     }
 
@@ -49,6 +59,41 @@ pub const Server = struct {
             l.socket.close(self.io);
             self.listener = null;
         }
+
+        // Interrupt all active connections so workers in blocking read return immediately
+        self.active_conns_mutex.lockUncancelable(self.io);
+        var curr = self.active_conns_head;
+        while (curr) |node| {
+            _ = std.c.shutdown(node.handle, 2);
+            curr = node.next;
+        }
+        self.active_conns_mutex.unlock(self.io);
+    }
+
+    fn registerConnNode(self: *Server, node: *ConnNode) void {
+        self.active_conns_mutex.lockUncancelable(self.io);
+        defer self.active_conns_mutex.unlock(self.io);
+        node.next = self.active_conns_head;
+        node.prev = null;
+        if (self.active_conns_head) |head| {
+            head.prev = node;
+        }
+        self.active_conns_head = node;
+    }
+
+    fn unregisterConnNode(self: *Server, node: *ConnNode) void {
+        self.active_conns_mutex.lockUncancelable(self.io);
+        defer self.active_conns_mutex.unlock(self.io);
+        if (node.prev) |prev| {
+            prev.next = node.next;
+        } else {
+            self.active_conns_head = node.next;
+        }
+        if (node.next) |next| {
+            next.prev = node.prev;
+        }
+        node.prev = null;
+        node.next = null;
     }
 
     pub fn listenAndServe(self: *Server, host: []const u8, port: u16) !void {
@@ -90,6 +135,9 @@ pub const Server = struct {
     }
 
     pub fn serveConn(self: *Server, stream: std.Io.net.Stream) void {
+        var conn_node = ConnNode{ .handle = stream.socket.handle };
+        self.registerConnNode(&conn_node);
+        defer self.unregisterConnNode(&conn_node);
         defer stream.close(self.io);
 
         // Allocate a dedicated connection read buffer (e.g. 8KB)
@@ -101,21 +149,14 @@ pub const Server = struct {
 
         // Keep-Alive connection loop
         while (self.running.load(.acquire)) {
-            // If connection is idle between requests and queue has pending tasks,
-            // don't hog the worker thread: close connection gracefully and yield thread to pending tasks
-            if (is_idle and buf_len == 0) {
-                if (self.pool) |p| {
-                    if (p.hasPendingTasks()) {
-                        return;
-                    }
-                }
-            }
-
             // 1. First check if complete HTTP headers already reside in buffer (Pipelining support)
             var head_end: ?usize = std.mem.indexOf(u8, conn_buf[0..buf_len], "\r\n\r\n");
             var header_deadline: ?std.Io.Timeout = null;
+            var idle_deadline: ?std.Io.Timeout = null;
 
             while (head_end == null) {
+                if (!self.running.load(.acquire)) return;
+
                 if (buf_len >= conn_buf.len) {
                     // Exceeded max_header_bytes -> 431 Request Header Fields Too Large
                     const msg = [1][]const u8{"HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n"};
@@ -123,44 +164,68 @@ pub const Server = struct {
                     return;
                 }
 
-                // Determine timeout:
-                // Idle keep-alive connection waiting for first byte uses idle_timeout_ns
-                // Active reading of request headers uses fixed header_deadline (Slowloris defense)
-                const current_timeout: std.Io.Timeout = if (is_idle and buf_len == 0) blk: {
-                    if (self.options.idle_timeout_ns orelse self.options.read_timeout_ns) |ns| {
-                        break :blk .{ .duration = .{ .raw = .{ .nanoseconds = @intCast(ns) }, .clock = .boot } };
+                // If connection is idle between requests, read in small time slices (100ms)
+                // so we can promptly release worker if tasks are queued or server is shutting down
+                if (is_idle and buf_len == 0) {
+                    if (self.pool) |p| {
+                        if (p.hasPendingTasks()) return;
                     }
-                    break :blk .none;
-                } else blk: {
-                    if (header_deadline == null) {
-                        if (self.options.read_header_timeout_ns orelse self.options.read_timeout_ns) |ns| {
-                            const dur = std.Io.Timeout{ .duration = .{ .raw = .{ .nanoseconds = @intCast(ns) }, .clock = .boot } };
-                            header_deadline = dur.toDeadline(self.io);
-                        } else {
-                            header_deadline = .none;
-                        }
-                    }
-                    break :blk header_deadline.?;
-                };
 
-                const n = io_util.readSocketWithTimeout(stream, self.io, conn_buf[buf_len..], current_timeout) catch |err| {
-                    if (err == error.Timeout) {
-                        if (is_idle and buf_len == 0) {
-                            // Idle keep-alive connection timed out cleanly
-                            return;
+                    if (idle_deadline == null) {
+                        if (self.options.idle_timeout_ns orelse self.options.read_timeout_ns) |ns| {
+                            const dur = std.Io.Timeout{ .duration = .{ .raw = .{ .nanoseconds = @intCast(ns) }, .clock = .boot } };
+                            idle_deadline = dur.toDeadline(self.io);
                         } else {
-                            // Slowloris or slow client during headers: 408 Request Timeout
-                            const msg = [1][]const u8{"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n"};
-                            _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
-                            return;
+                            idle_deadline = .none;
                         }
                     }
-                    if (err == error.EndOfStream or buf_len == 0) return;
+
+                    const slice_timeout: std.Io.Timeout = .{
+                        .duration = .{ .raw = .{ .nanoseconds = 100 * std.time.ns_per_ms }, .clock = .boot },
+                    };
+
+                    const n = io_util.readSocketWithTimeout(stream, self.io, conn_buf[0..], slice_timeout) catch |err| {
+                        if (err == error.Timeout) {
+                            if (!self.running.load(.acquire)) return;
+                            if (self.pool) |p| {
+                                if (p.hasPendingTasks()) return;
+                            }
+                            if (idle_deadline.? != .none) {
+                                _ = io_util.readSocketWithTimeout(stream, self.io, conn_buf[0..0], idle_deadline.?) catch |dl_err| {
+                                    if (dl_err == error.Timeout) return;
+                                    return;
+                                };
+                            }
+                            continue;
+                        }
+                        return;
+                    };
+                    if (n == 0) return;
+                    buf_len += n;
+                    head_end = std.mem.indexOf(u8, conn_buf[0..buf_len], "\r\n\r\n");
+                    continue;
+                }
+
+                // Active reading of request headers uses fixed header_deadline (Slowloris defense)
+                if (header_deadline == null) {
+                    if (self.options.read_header_timeout_ns orelse self.options.read_timeout_ns) |ns| {
+                        const dur = std.Io.Timeout{ .duration = .{ .raw = .{ .nanoseconds = @intCast(ns) }, .clock = .boot } };
+                        header_deadline = dur.toDeadline(self.io);
+                    } else {
+                        header_deadline = .none;
+                    }
+                }
+
+                const n = io_util.readSocketWithTimeout(stream, self.io, conn_buf[buf_len..], header_deadline.?) catch |err| {
+                    if (err == error.Timeout) {
+                        const msg = [1][]const u8{"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n"};
+                        _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
+                        return;
+                    }
                     return;
                 };
-                if (n == 0) return; // Client closed connection
+                if (n == 0) return;
                 buf_len += n;
-
                 head_end = std.mem.indexOf(u8, conn_buf[0..buf_len], "\r\n\r\n");
             }
 
@@ -169,7 +234,7 @@ pub const Server = struct {
             defer arena.deinit();
             const req_allocator = arena.allocator();
 
-            const head = parseRequestHead(req_allocator, conn_buf[0..buf_len]) catch |err| {
+            var head = parseRequestHead(req_allocator, conn_buf[0..buf_len]) catch |err| {
                 if (err == error.UnsupportedTransferEncoding) {
                     const msg = [1][]const u8{"HTTP/1.1 501 Not Implemented\r\nConnection: close\r\n\r\n"};
                     _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
@@ -183,7 +248,7 @@ pub const Server = struct {
             const header_bytes = head.bytes_consumed;
             const extra_in_buf = conn_buf[header_bytes..buf_len];
 
-            // Build BodyReader
+            // Build BodyReader with absolute deadline
             var body_reader = BodyReader.init(
                 stream,
                 self.io,
@@ -191,7 +256,7 @@ pub const Server = struct {
                 head.content_length,
                 head.is_chunked,
             );
-            body_reader.setReadTimeout(self.options.read_timeout_ns);
+            body_reader.setReadDeadline(self.options.read_timeout_ns);
 
             // Construct Request and ResponseWriter
             var req = Request.init(
@@ -217,6 +282,9 @@ pub const Server = struct {
             // Invoke Handler (Catch error to avoid crash and isolate 500)
             self.options.handler.serveHTTP(&res, &req) catch |err| {
                 std.log.warn("Handler error (handled as 500): {}", .{err});
+                // Any error during handler terminates connection to prevent framing desync
+                head.keep_alive = false;
+                res.keep_alive = false;
                 if (!res.header_written) {
                     res.setStatus(.internal_server_error);
                     res.writeAll("500 Internal Server Error\n") catch {};
@@ -226,7 +294,7 @@ pub const Server = struct {
             // Finalize response
             res.finish() catch return;
 
-            // If keep-alive is false (or disabled due to body mismatch), close connection
+            // If keep-alive is false (or disabled due to body mismatch / error), close connection
             if (!head.keep_alive or !res.keep_alive) {
                 return;
             }
@@ -237,6 +305,7 @@ pub const Server = struct {
                 var total_discarded: usize = 0;
                 var discard_buf: [1024]u8 = undefined;
                 var too_large = false;
+                var drain_failed = false;
 
                 while (true) {
                     const to_read = @min(discard_buf.len, max_discard - total_discarded);
@@ -244,13 +313,16 @@ pub const Server = struct {
                         too_large = true;
                         break;
                     }
-                    const n = b.read(discard_buf[0..to_read]) catch break;
+                    const n = b.read(discard_buf[0..to_read]) catch {
+                        drain_failed = true;
+                        break;
+                    };
                     if (n == 0) break;
                     total_discarded += n;
                 }
 
-                if (too_large) {
-                    // Unread body exceeded 256KB, close connection to prevent DoS (mimicking Go net/http)
+                if (too_large or drain_failed) {
+                    // Body error during drain must not reuse connection
                     return;
                 }
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const io_util = @import("io_util.zig");
+const isValidTokenChar = @import("../header.zig").isValidTokenChar;
 
 /// A stream body reader that supports fixed Content-Length reading
 /// and handles reading out of the initial buffer first.
@@ -11,7 +12,7 @@ pub const BodyReader = struct {
     is_chunked: bool,
     chunk_remaining: u64 = 0,
     chunk_done: bool = false,
-    read_timeout_ns: ?u64 = null,
+    deadline: std.Io.Timeout = .none,
 
     pub fn init(
         stream: std.Io.net.Stream,
@@ -26,12 +27,21 @@ pub const BodyReader = struct {
             .unread_slice = initial_unread,
             .remaining_content_length = content_length,
             .is_chunked = is_chunked,
-            .read_timeout_ns = null,
+            .deadline = .none,
         };
     }
 
+    pub fn setReadDeadline(self: *BodyReader, timeout_ns: ?u64) void {
+        if (timeout_ns) |ns| {
+            const dur = std.Io.Timeout{ .duration = .{ .raw = .{ .nanoseconds = @intCast(ns) }, .clock = .boot } };
+            self.deadline = dur.toDeadline(self.io);
+        } else {
+            self.deadline = .none;
+        }
+    }
+
     pub fn setReadTimeout(self: *BodyReader, timeout_ns: ?u64) void {
-        self.read_timeout_ns = timeout_ns;
+        self.setReadDeadline(timeout_ns);
     }
 
     pub fn read(self: *BodyReader, dest: []u8) !usize {
@@ -54,8 +64,8 @@ pub const BodyReader = struct {
                 return take;
             }
 
-            // Otherwise read directly from socket with optional timeout
-            const n = try io_util.readSocketTimeout(self.stream, self.io, dest[0..to_read], self.read_timeout_ns);
+            // Otherwise read directly from socket with deadline
+            const n = try io_util.readSocketWithTimeout(self.stream, self.io, dest[0..to_read], self.deadline);
             if (n == 0) return error.UnexpectedEOF; // premature EOF when expecting more content
             self.remaining_content_length.? -= n;
             return n;
@@ -77,7 +87,7 @@ pub const BodyReader = struct {
                 @memcpy(dest[0..n], self.unread_slice[0..n]);
                 self.unread_slice = self.unread_slice[n..];
             } else {
-                n = try io_util.readSocketTimeout(self.stream, self.io, dest[0..to_read], self.read_timeout_ns);
+                n = try io_util.readSocketWithTimeout(self.stream, self.io, dest[0..to_read], self.deadline);
                 if (n == 0) return error.UnexpectedEOF;
             }
             self.chunk_remaining -= n;
@@ -94,9 +104,10 @@ pub const BodyReader = struct {
             self.chunk_done = true;
             var total_trailer_bytes: usize = 0;
             const max_trailer_bytes: usize = 16 * 1024;
+            var trailer_buf: [1024]u8 = undefined;
             // Consume optional trailers until terminal empty line CRLF
             while (true) {
-                const trailer_len = try self.readLine();
+                const trailer_len = try self.readTrailerLine(&trailer_buf);
                 if (trailer_len == 0) break;
                 total_trailer_bytes += trailer_len + 2;
                 if (total_trailer_bytes > max_trailer_bytes) return error.TrailerTooLarge;
@@ -115,28 +126,53 @@ pub const BodyReader = struct {
             return b;
         }
         var buf: [1]u8 = undefined;
-        const n = try io_util.readSocketTimeout(self.stream, self.io, &buf, self.read_timeout_ns);
+        const n = try io_util.readSocketWithTimeout(self.stream, self.io, &buf, self.deadline);
         if (n == 0) return error.UnexpectedEOF;
         return buf[0];
     }
 
-    fn readLine(self: *BodyReader) !usize {
+    fn readTrailerLine(self: *BodyReader, out_buf: []u8) !usize {
         var len: usize = 0;
         var cr_seen = false;
-        while (true) {
+        while (len < out_buf.len) {
             const b = try self.readByte();
             if (b == '\n') {
                 if (!cr_seen) return error.InvalidTrailerCRLF; // Bare LF is forbidden
-                return len;
+                break;
             }
             if (b == '\r') {
                 cr_seen = true;
                 continue;
             }
             if (cr_seen) return error.InvalidTrailerCRLF;
+            out_buf[len] = b;
             len += 1;
-            if (len > 4096) return error.LineTooLong;
         }
+        if (len == out_buf.len and !cr_seen) return error.LineTooLong;
+
+        if (len == 0) return 0; // Terminal empty line
+
+        // Validate trailer field-line syntax (RFC 9112 Section 7.1.2)
+        const colon_idx = std.mem.indexOfScalar(u8, out_buf[0..len], ':') orelse return error.InvalidTrailerHeader;
+        const raw_name = out_buf[0..colon_idx];
+        if (raw_name.len == 0) return error.InvalidTrailerHeader;
+        if (raw_name[raw_name.len - 1] == ' ' or raw_name[raw_name.len - 1] == '\t') return error.InvalidTrailerHeader;
+        for (raw_name) |c| {
+            if (!isValidTokenChar(c)) return error.InvalidTrailerHeader;
+        }
+
+        // RFC 9110 Section 6.5.1: Forbidden trailer fields
+        if (std.ascii.eqlIgnoreCase(raw_name, "transfer-encoding") or
+            std.ascii.eqlIgnoreCase(raw_name, "content-length") or
+            std.ascii.eqlIgnoreCase(raw_name, "host") or
+            std.ascii.eqlIgnoreCase(raw_name, "trailer") or
+            std.ascii.eqlIgnoreCase(raw_name, "authorization") or
+            std.ascii.eqlIgnoreCase(raw_name, "set-cookie"))
+        {
+            return error.ForbiddenTrailerField;
+        }
+
+        return len;
     }
 
     fn consumeExact(self: *BodyReader, expected: []const u8) !void {
@@ -252,4 +288,56 @@ test "BodyReader: returns UnexpectedEOF when content-length not satisfied (Findi
 
     // Second read encounters client closed connection before 50 bytes satisfied -> MUST return error.UnexpectedEOF
     try std.testing.expectError(error.UnexpectedEOF, reader.read(&buf));
+}
+
+test "BodyReader: chunk trailer parsing and validation" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const dummy_stream: std.Io.net.Stream = undefined;
+
+    // 1. Valid trailer succeeds
+    {
+        const raw = "5\r\nhello\r\n0\r\nX-Checksum: abc123\r\n\r\n";
+        var reader = BodyReader.init(dummy_stream, io, raw, null, true);
+        var buf: [16]u8 = undefined;
+        const n = try reader.read(&buf);
+        try std.testing.expectEqual(@as(usize, 5), n);
+        const eof = try reader.read(&buf);
+        try std.testing.expectEqual(@as(usize, 0), eof);
+    }
+
+    // 2. Bare LF in trailer is rejected
+    {
+        const raw = "5\r\nhello\r\n0\r\nX-Checksum: abc123\n\r\n";
+        var reader = BodyReader.init(dummy_stream, io, raw, null, true);
+        var buf: [16]u8 = undefined;
+        _ = try reader.read(&buf);
+        try std.testing.expectError(error.InvalidTrailerCRLF, reader.read(&buf));
+    }
+
+    // 3. Forbidden trailer Transfer-Encoding is rejected
+    {
+        const raw = "5\r\nhello\r\n0\r\nTransfer-Encoding: chunked\r\n\r\n";
+        var reader = BodyReader.init(dummy_stream, io, raw, null, true);
+        var buf: [16]u8 = undefined;
+        _ = try reader.read(&buf);
+        try std.testing.expectError(error.ForbiddenTrailerField, reader.read(&buf));
+    }
+
+    // 4. Forbidden trailer Content-Length is rejected
+    {
+        const raw = "5\r\nhello\r\n0\r\nContent-Length: 5\r\n\r\n";
+        var reader = BodyReader.init(dummy_stream, io, raw, null, true);
+        var buf: [16]u8 = undefined;
+        _ = try reader.read(&buf);
+        try std.testing.expectError(error.ForbiddenTrailerField, reader.read(&buf));
+    }
+
+    // 5. Space before colon is rejected (RFC 9112 Section 7.1.2 / 5.1)
+    {
+        const raw = "5\r\nhello\r\n0\r\nX-Header : bad\r\n\r\n";
+        var reader = BodyReader.init(dummy_stream, io, raw, null, true);
+        var buf: [16]u8 = undefined;
+        _ = try reader.read(&buf);
+        try std.testing.expectError(error.InvalidTrailerHeader, reader.read(&buf));
+    }
 }

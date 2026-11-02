@@ -42,7 +42,7 @@ pub const ResponseWriter = struct {
     pub fn allowsBody(status: Status) bool {
         const code = status.code();
         if (code >= 100 and code < 200) return false;
-        if (code == 204 or code == 304) return false;
+        if (code == 204 or code == 205 or code == 304) return false;
         return true;
     }
 
@@ -162,6 +162,20 @@ pub const ResponseWriter = struct {
             self.buffer_len = 0;
         }
 
+        // RFC 9110 Section 8.6 & 6.4.1:
+        // 1xx, 204, 304 must NOT include Content-Length or Transfer-Encoding (strip even if user set them)
+        // 205 MUST NOT include a body; Content-Length if present must be 0, no chunked
+        const code = self.status_code.code();
+        if ((code >= 100 and code < 200) or code == 204 or code == 304) {
+            self.headers.delete("Content-Length");
+            self.headers.delete("Transfer-Encoding");
+        } else if (code == 205) {
+            self.headers.delete("Transfer-Encoding");
+            if (self.headers.get("content-length") != null) {
+                try self.headers.set("Content-Length", "0");
+            }
+        }
+
         // Format Status Line: "HTTP/1.1 200 OK\r\n"
         var line_buf: [64]u8 = undefined;
         const status_line = std.fmt.bufPrint(&line_buf, "HTTP/1.1 {d} {s}\r\n", .{
@@ -228,6 +242,9 @@ pub const ResponseWriter = struct {
             // Response fit completely inside buffer or is HEAD / 204
             if (!body_allowed) {
                 self.buffer_len = 0;
+                if (self.status_code.code() == 205) {
+                    try self.headers.set("Content-Length", "0");
+                }
             } else if (self.is_head) {
                 if (self.headers.get("content-length") == null) {
                     var len_buf: [32]u8 = undefined;
