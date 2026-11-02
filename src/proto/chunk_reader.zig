@@ -265,10 +265,11 @@ test "BodyReader: parses valid chunked payload from initial buffer" {
 test "BodyReader: returns UnexpectedEOF when content-length not satisfied (Finding 3)" {
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    const port: u16 = 19105;
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try addr.listen(io, .{ .reuse_address = true });
     defer listener.socket.close(io);
+    const listen_port = listener.socket.address.getPort();
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", listen_port);
 
     const ClientThread = struct {
         fn run(target_addr: std.Io.net.IpAddress, io_ctx: std.Io) void {
@@ -279,7 +280,7 @@ test "BodyReader: returns UnexpectedEOF when content-length not satisfied (Findi
             _ = io_ctx.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } }) catch return;
         }
     };
-    const t = try std.Thread.spawn(.{}, ClientThread.run, .{ addr, io });
+    const t = try std.Thread.spawn(.{}, ClientThread.run, .{ connect_addr, io });
     defer t.join();
 
     var server_stream = try listener.accept(io);

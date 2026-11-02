@@ -42,6 +42,10 @@ test "e2e: GET, POST echo, and Keep-Alive" {
         fn run(s: *http.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = s.listener.?.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.pool.?.spawn(struct {
                     fn handle(srv: *http.Server, strm: std.Io.net.Stream) void {
                         srv.serveConn(strm);
@@ -191,6 +195,10 @@ test "e2e: 431 header too large and 500 internal server error" {
         fn run(s: *http.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = s.listener.?.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.serveConn(stream);
             }
         }
@@ -287,6 +295,10 @@ test "e2e: Go 1.22+ pattern routing with wildcards and 405 Method Not Allowed" {
         fn run(s: *http.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = s.listener.?.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.serveConn(stream);
             }
         }
@@ -398,6 +410,10 @@ test "e2e: Server header and idle timeout handling" {
         fn run(s: *http.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = s.listener.?.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.serveConn(stream);
             }
         }
@@ -495,6 +511,10 @@ test "e2e: HTTP pipelining and RFC compliance (400 on missing Host, 204 No Conte
         fn run(s: *http.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = s.listener.?.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.serveConn(stream);
             }
         }
@@ -732,9 +752,9 @@ test "review: Finding 4, 5, 10 - HEAD suppression, 204 suppression, Content-Leng
         }
     }.handle);
 
-    const port: u16 = 19100;
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
 
     var server = http.Server.init(allocator, .{
         .handler = mux.handler(),
@@ -749,6 +769,10 @@ test "review: Finding 4, 5, 10 - HEAD suppression, 204 suppression, Content-Leng
         fn run(s: *http.Server, l: *std.Io.net.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
                     stream.close(s.io);
                 };
@@ -848,9 +872,9 @@ test "review round 2: Finding 1 - shutdown interrupts idle keep-alive connection
         }
     }.handle);
 
-    const port: u16 = 19201;
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
 
     var server = http.Server.init(allocator, .{
         .handler = mux.handler(),
@@ -865,6 +889,10 @@ test "review round 2: Finding 1 - shutdown interrupts idle keep-alive connection
         fn run(s: *http.Server, l: *std.Io.net.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
                     stream.close(s.io);
                 };
@@ -906,9 +934,9 @@ test "review round 2: Finding 2 - worker pool yields idle keep-alive connection 
         }
     }.handle);
 
-    const port: u16 = 19202;
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
 
     // Server with only 1 worker thread!
     var server = http.Server.init(allocator, .{
@@ -925,6 +953,10 @@ test "review round 2: Finding 2 - worker pool yields idle keep-alive connection 
         fn run(s: *http.Server, l: *std.Io.net.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
                     stream.close(s.io);
                 };
@@ -987,9 +1019,9 @@ test "review round 2: Finding 3 - handler error forces Connection: close and pre
         }
     }.handle);
 
-    const port: u16 = 19203;
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
 
     var server = http.Server.init(allocator, .{
         .handler = mux.handler(),
@@ -1004,6 +1036,10 @@ test "review round 2: Finding 3 - handler error forces Connection: close and pre
         fn run(s: *http.Server, l: *std.Io.net.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
                     stream.close(s.io);
                 };
@@ -1071,9 +1107,9 @@ test "review round 2: Finding 4 - status 205 and header stripping on bodyless re
         }
     }.handle);
 
-    const port: u16 = 19204;
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
 
     var server = http.Server.init(allocator, .{
         .handler = mux.handler(),
@@ -1088,6 +1124,10 @@ test "review round 2: Finding 4 - status 205 and header stripping on bodyless re
         fn run(s: *http.Server, l: *std.Io.net.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
                     stream.close(s.io);
                 };
@@ -1108,9 +1148,15 @@ test "review round 2: Finding 4 - status 205 and header stripping on bodyless re
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
 
         var resp_buf: [512]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
-        const resp_str = resp_buf[0..n];
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+            if (std.mem.indexOf(u8, resp_buf[0..total_read], "\r\n\r\n") != null) break;
+        }
+        const resp_str = resp_buf[0..total_read];
 
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "205 Reset Content") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "Content-Length: 0") != null);
@@ -1129,9 +1175,15 @@ test "review round 2: Finding 4 - status 205 and header stripping on bodyless re
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
 
         var resp_buf: [512]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
-        const resp_str = resp_buf[0..n];
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+            if (std.mem.indexOf(u8, resp_buf[0..total_read], "\r\n\r\n") != null) break;
+        }
+        const resp_str = resp_buf[0..total_read];
 
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "204 No Content") != null);
         try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "content-length") == null);
@@ -1156,9 +1208,9 @@ test "review round 2: Finding 5 - monotonic read deadline stops Slow Post trickl
         }
     }.handle);
 
-    const port: u16 = 19205;
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
 
     // read_timeout_ns = 150ms
     var server = http.Server.init(allocator, .{
@@ -1175,6 +1227,10 @@ test "review round 2: Finding 5 - monotonic read deadline stops Slow Post trickl
         fn run(s: *http.Server, l: *std.Io.net.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
                     stream.close(s.io);
                 };
@@ -1224,9 +1280,9 @@ test "review round 2: Finding 6 - duplicate chunked and forbidden chunk trailers
         }
     }.handle);
 
-    const port: u16 = 19206;
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
 
     var server = http.Server.init(allocator, .{
         .handler = mux.handler(),
@@ -1241,6 +1297,10 @@ test "review round 2: Finding 6 - duplicate chunked and forbidden chunk trailers
         fn run(s: *http.Server, l: *std.Io.net.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
                     stream.close(s.io);
                 };
@@ -1310,9 +1370,9 @@ test "review round 3: Finding 2 - truncated body or handler error enforces Conne
         }
     }.handle);
 
-    const port: u16 = 19301;
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
 
     var server = http.Server.init(allocator, .{
         .handler = mux.handler(),
@@ -1327,6 +1387,10 @@ test "review round 3: Finding 2 - truncated body or handler error enforces Conne
         fn run(s: *http.Server, l: *std.Io.net.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
                     stream.close(s.io);
                 };
@@ -1401,9 +1465,9 @@ test "review round 3: Finding 3 - HTTP/1.0 request receives HTTP/1.0 status line
         }
     }.handle);
 
-    const port: u16 = 19302;
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
 
     var server = http.Server.init(allocator, .{
         .handler = mux.handler(),
@@ -1418,6 +1482,10 @@ test "review round 3: Finding 3 - HTTP/1.0 request receives HTTP/1.0 status line
         fn run(s: *http.Server, l: *std.Io.net.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
                     stream.close(s.io);
                 };
@@ -1480,9 +1548,9 @@ test "review round 3: Finding 5 - Host case-insensitivity and IPv6 routing in li
         }
     }.handle);
 
-    const port: u16 = 19303;
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
 
     var server = http.Server.init(allocator, .{
         .handler = mux.handler(),
@@ -1497,6 +1565,10 @@ test "review round 3: Finding 5 - Host case-insensitivity and IPv6 routing in li
         fn run(s: *http.Server, l: *std.Io.net.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
                     stream.close(s.io);
                 };
@@ -1512,7 +1584,8 @@ test "review round 3: Finding 5 - Host case-insensitivity and IPv6 routing in li
         var client = try connect_addr.connect(io, .{ .mode = .stream });
         defer client.close(io);
 
-        const req = "GET /info HTTP/1.1\r\nHost: myhost.com:19303\r\nConnection: close\r\n\r\n";
+        var req_buf: [128]u8 = undefined;
+        const req = try std.fmt.bufPrint(&req_buf, "GET /info HTTP/1.1\r\nHost: myhost.com:{d}\r\nConnection: close\r\n\r\n", .{port});
         var vec = [1][]const u8{req};
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
 
@@ -1543,9 +1616,9 @@ test "review round 3: Finding 6 - RFC 9112 request-target rejection in live serv
         }
     }.handle);
 
-    const port: u16 = 19304;
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
 
     var server = http.Server.init(allocator, .{
         .handler = mux.handler(),
@@ -1560,6 +1633,10 @@ test "review round 3: Finding 6 - RFC 9112 request-target rejection in live serv
         fn run(s: *http.Server, l: *std.Io.net.Server) void {
             while (s.running.load(.acquire)) {
                 const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
                 s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
                     stream.close(s.io);
                 };

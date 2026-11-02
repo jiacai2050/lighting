@@ -56,6 +56,16 @@ pub const Server = struct {
     pub fn shutdown(self: *Server) void {
         if (!self.running.swap(false, .acq_rel)) return;
         if (self.listener) |*l| {
+            // On Linux, closing a socket does not wake up a thread blocked in accept4().
+            // Connect a loopback dummy probe to wake up the accept thread so it exits promptly.
+            const port = l.socket.address.getPort();
+            if (port != 0) {
+                if (std.Io.net.IpAddress.parseIp4("127.0.0.1", port)) |addr| {
+                    if (addr.connect(self.io, .{ .mode = .stream })) |dummy| {
+                        dummy.close(self.io);
+                    } else |_| {}
+                } else |_| {}
+            }
             l.socket.close(self.io);
             self.listener = null;
         }
@@ -191,10 +201,11 @@ pub const Server = struct {
                                 if (p.hasPendingTasks()) return;
                             }
                             if (idle_deadline.? != .none) {
-                                _ = io_util.readSocketWithTimeout(stream, self.io, conn_buf[0..0], idle_deadline.?) catch |dl_err| {
-                                    if (dl_err == error.Timeout) return;
+                                if (idle_deadline.?.toDurationFromNow(self.io)) |d| {
+                                    if (d.raw.nanoseconds <= 0) return;
+                                } else {
                                     return;
-                                };
+                                }
                             }
                             continue;
                         }
