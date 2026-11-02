@@ -11,6 +11,8 @@ pub const ResponseWriter = struct {
     status_code: Status = .ok,
     header_written: bool = false,
     keep_alive: bool = true,
+    is_head: bool = false,
+    bytes_written: u64 = 0,
     write_timeout_ns: ?u64 = null,
 
     // Dual-mode buffering
@@ -23,6 +25,7 @@ pub const ResponseWriter = struct {
         io: std.Io,
         arena: std.mem.Allocator,
         keep_alive: bool,
+        is_head: bool,
     ) ResponseWriter {
         return .{
             .stream = stream,
@@ -30,8 +33,17 @@ pub const ResponseWriter = struct {
             .arena = arena,
             .headers = HeaderMap.init(arena),
             .keep_alive = keep_alive,
+            .is_head = is_head,
+            .bytes_written = 0,
             .write_timeout_ns = null,
         };
+    }
+
+    pub fn allowsBody(status: Status) bool {
+        const code = status.code();
+        if (code >= 100 and code < 200) return false;
+        if (code == 204 or code == 304) return false;
+        return true;
     }
 
     pub fn setWriteTimeout(self: *ResponseWriter, timeout_ns: ?u64) void {
@@ -56,6 +68,26 @@ pub const ResponseWriter = struct {
     pub fn write(self: *ResponseWriter, data: []const u8) !usize {
         if (data.len == 0) return 0;
 
+        // 1. If status does not allow a body (204, 304, 1xx), suppress body completely (RFC 9110)
+        if (!allowsBody(self.status_code)) {
+            return data.len;
+        }
+
+        // 2. If HEAD request, suppress body completely, but count bytes for Content-Length (RFC 9110)
+        if (self.is_head) {
+            self.bytes_written += data.len;
+            return data.len;
+        }
+
+        // 3. Finding 10: Check against explicit user-specified Content-Length
+        if (self.headers.get("content-length")) |cl_str| {
+            if (std.fmt.parseInt(u64, cl_str, 10)) |cl| {
+                if (self.bytes_written + self.buffer_len + data.len > cl) {
+                    return error.ContentLengthExceeded;
+                }
+            } else |_| {}
+        }
+
         // If headers not yet written and data fits in buffer: buffer it!
         if (!self.header_written and (self.buffer_len + data.len <= self.buffer.len)) {
             @memcpy(self.buffer[self.buffer_len .. self.buffer_len + data.len], data);
@@ -78,19 +110,23 @@ pub const ResponseWriter = struct {
             // First flush any buffered data as a chunk
             if (self.buffer_len > 0) {
                 try self.writeChunk(self.buffer[0..self.buffer_len]);
+                self.bytes_written += self.buffer_len;
                 self.buffer_len = 0;
             }
             // Then write this data as a chunk
             try self.writeChunk(data);
+            self.bytes_written += data.len;
         } else {
             // Direct write
             if (self.buffer_len > 0) {
                 var vec = [1][]const u8{self.buffer[0..self.buffer_len]};
                 try io_util.writeSocketAllTimeout(self.stream, self.io, &vec, self.write_timeout_ns);
+                self.bytes_written += self.buffer_len;
                 self.buffer_len = 0;
             }
             var vec = [1][]const u8{data};
             try io_util.writeSocketAllTimeout(self.stream, self.io, &vec, self.write_timeout_ns);
+            self.bytes_written += data.len;
         }
 
         return data.len;
@@ -119,6 +155,11 @@ pub const ResponseWriter = struct {
             try self.headers.set("Connection", "close");
         } else if (self.keep_alive and self.headers.get("connection") == null) {
             try self.headers.set("Connection", "keep-alive");
+        }
+
+        // If status or method forbids a body, ensure no buffer is emitted
+        if (!allowsBody(self.status_code) or self.is_head) {
+            self.buffer_len = 0;
         }
 
         // Format Status Line: "HTTP/1.1 200 OK\r\n"
@@ -150,6 +191,7 @@ pub const ResponseWriter = struct {
             if (self.buffer_len > 0) {
                 stack_vecs[vec_count] = self.buffer[0..self.buffer_len];
                 vec_count += 1;
+                self.bytes_written += self.buffer_len;
                 self.buffer_len = 0;
             }
 
@@ -170,6 +212,7 @@ pub const ResponseWriter = struct {
 
             if (self.buffer_len > 0) {
                 try vecs.append(self.arena, self.buffer[0..self.buffer_len]);
+                self.bytes_written += self.buffer_len;
                 self.buffer_len = 0;
             }
 
@@ -179,24 +222,41 @@ pub const ResponseWriter = struct {
 
     /// Called at the end of the request handler execution
     pub fn finish(self: *ResponseWriter) !void {
-        if (!self.header_written) {
-            // Response fit completely inside buffer!
-            const code = self.status_code.code();
-            const omit_content_length = (code >= 100 and code < 200) or code == 204 or code == 304;
+        const body_allowed = allowsBody(self.status_code);
 
-            if (!omit_content_length and self.headers.get("content-length") == null) {
-                var len_buf: [32]u8 = undefined;
-                const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{self.buffer_len}) catch unreachable;
-                const len_dup = try self.arena.dupe(u8, len_str);
-                try self.headers.set("Content-Length", len_dup);
+        if (!self.header_written) {
+            // Response fit completely inside buffer or is HEAD / 204
+            if (!body_allowed) {
+                self.buffer_len = 0;
+            } else if (self.is_head) {
+                if (self.headers.get("content-length") == null) {
+                    var len_buf: [32]u8 = undefined;
+                    const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{self.bytes_written}) catch unreachable;
+                    const len_dup = try self.arena.dupe(u8, len_str);
+                    try self.headers.set("Content-Length", len_dup);
+                }
+                self.buffer_len = 0;
+            } else {
+                if (self.headers.get("content-length") == null) {
+                    var len_buf: [32]u8 = undefined;
+                    const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{self.buffer_len}) catch unreachable;
+                    const len_dup = try self.arena.dupe(u8, len_str);
+                    try self.headers.set("Content-Length", len_dup);
+                }
             }
             try self.flushHeaders();
         } else {
             // Headers were already flushed
+            if (!body_allowed or self.is_head) {
+                self.buffer_len = 0;
+                return;
+            }
+
             if (self.chunked_mode) {
                 // If there is residual data in buffer
                 if (self.buffer_len > 0) {
                     try self.writeChunk(self.buffer[0..self.buffer_len]);
+                    self.bytes_written += self.buffer_len;
                     self.buffer_len = 0;
                 }
                 // Send terminal 0\r\n\r\n chunk
@@ -206,8 +266,21 @@ pub const ResponseWriter = struct {
                 if (self.buffer_len > 0) {
                     var vec = [1][]const u8{self.buffer[0..self.buffer_len]};
                     try io_util.writeSocketAllTimeout(self.stream, self.io, &vec, self.write_timeout_ns);
+                    self.bytes_written += self.buffer_len;
                     self.buffer_len = 0;
                 }
+            }
+        }
+
+        // Finding 10: Check if actual written was less than user-specified Content-Length
+        if (body_allowed and !self.is_head and !self.chunked_mode) {
+            if (self.headers.get("content-length")) |cl_str| {
+                if (std.fmt.parseInt(u64, cl_str, 10)) |cl| {
+                    if (self.bytes_written < cl) {
+                        // Body truncated by handler; close connection to prevent desynchronization
+                        self.keep_alive = false;
+                    }
+                } else |_| {}
             }
         }
     }

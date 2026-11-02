@@ -21,6 +21,8 @@ pub const Server = @import("server.zig").Server;
 pub const ServerOptions = @import("server.zig").ServerOptions;
 
 pub const ThreadPool = @import("thread_pool.zig").ThreadPool;
+pub const parseRequestHead = @import("proto/parser.zig").parseRequestHead;
+pub const BodyReader = @import("proto/chunk_reader.zig").BodyReader;
 
 test {
     std.testing.refAllDecls(@This());

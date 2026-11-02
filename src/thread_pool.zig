@@ -8,6 +8,7 @@ pub const ThreadPool = struct {
     threads: []std.Thread,
     queue: std.ArrayListUnmanaged(Task),
     queue_head: usize = 0,
+    max_queue_size: usize = 1024,
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
     running: std.atomic.Value(bool) = .init(true),
@@ -18,7 +19,7 @@ pub const ThreadPool = struct {
         ctx: *anyopaque,
     };
 
-    pub fn create(allocator: std.mem.Allocator, io: std.Io, num_threads: usize) !*ThreadPool {
+    pub fn create(allocator: std.mem.Allocator, io: std.Io, num_threads: usize, max_queue_size: usize) !*ThreadPool {
         const self = try allocator.create(ThreadPool);
         const actual_threads = if (num_threads == 0) 4 else num_threads;
         self.* = .{
@@ -26,6 +27,7 @@ pub const ThreadPool = struct {
             .threads = try allocator.alloc(std.Thread, actual_threads),
             .queue = .empty,
             .queue_head = 0,
+            .max_queue_size = if (max_queue_size == 0) 1024 else max_queue_size,
             .mutex = .init,
             .cond = .init,
             .running = .init(true),
@@ -83,6 +85,7 @@ pub const ThreadPool = struct {
         };
 
         const closure = try self.allocator.create(Closure);
+        errdefer self.allocator.destroy(closure);
         closure.* = .{
             .arguments = args,
             .allocator = self.allocator,
@@ -94,9 +97,26 @@ pub const ThreadPool = struct {
         };
 
         self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.queue.items.len - self.queue_head >= self.max_queue_size) {
+            return error.QueueFull;
+        }
+
         try self.queue.append(self.allocator, task);
-        self.mutex.unlock(self.io);
         self.cond.signal(self.io);
+    }
+
+    pub fn hasPendingTasks(self: *ThreadPool) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return (self.queue.items.len > self.queue_head);
+    }
+
+    pub fn pendingTaskCount(self: *ThreadPool) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return if (self.queue.items.len > self.queue_head) self.queue.items.len - self.queue_head else 0;
     }
 
     pub fn destroy(self: *ThreadPool) void {
@@ -122,7 +142,7 @@ pub const ThreadPool = struct {
 test "ThreadPool execution" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    const pool = try ThreadPool.create(allocator, io, 2);
+    const pool = try ThreadPool.create(allocator, io, 2, 1024);
     defer pool.destroy();
 
     const Worker = struct {

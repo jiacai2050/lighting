@@ -1,6 +1,7 @@
 const std = @import("std");
 const Method = @import("method.zig").Method;
 const HeaderMap = @import("../header.zig").HeaderMap;
+const isValidTokenChar = @import("../header.zig").isValidTokenChar;
 
 pub const Version = enum {
     @"HTTP/1.0",
@@ -36,9 +37,14 @@ pub const ParseError = error{
     InvalidMethod,
     InvalidTarget,
     InvalidVersion,
+    InvalidRequestLine,
     InvalidHeader,
+    InvalidHeaderColonWhitespace,
+    DuplicateHostHeader,
     InvalidContentLength,
     MissingHostHeader,
+    UnsupportedTransferEncoding,
+    ChunkedNotFinalTransferEncoding,
     OutOfMemory,
 };
 
@@ -51,11 +57,13 @@ pub fn parseRequestHead(allocator: std.mem.Allocator, buffer: []const u8) ParseE
     var line_it = std.mem.splitSequence(u8, head_part, "\r\n");
     const request_line = line_it.next() orelse return error.InvalidMethod;
 
-    // Parse request line: METHOD TARGET VERSION
+    // Parse request line: METHOD TARGET VERSION (strictly 3 space-separated non-empty tokens)
     var req_line_it = std.mem.splitScalar(u8, request_line, ' ');
     const method_str = req_line_it.next() orelse return error.InvalidMethod;
     const target = req_line_it.next() orelse return error.InvalidTarget;
     const version_str = req_line_it.next() orelse return error.InvalidVersion;
+    if (req_line_it.next() != null) return error.InvalidRequestLine;
+    if (method_str.len == 0 or target.len == 0 or version_str.len == 0) return error.InvalidRequestLine;
 
     const method = Method.parse(method_str) orelse return error.InvalidMethod;
     const version = Version.parse(version_str) orelse return error.InvalidVersion;
@@ -66,16 +74,37 @@ pub fn parseRequestHead(allocator: std.mem.Allocator, buffer: []const u8) ParseE
     var content_length: ?u64 = null;
     var is_chunked = false;
     var connection_hdr: ?[]const u8 = null;
+    var host_count: usize = 0;
 
     while (line_it.next()) |line| {
         if (line.len == 0) continue;
         const colon_idx = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidHeader;
-        const key = std.mem.trim(u8, line[0..colon_idx], " \t");
+        const raw_key = line[0..colon_idx];
+        if (raw_key.len == 0) return error.InvalidHeader;
+
+        // RFC 9112 Section 5.1: No whitespace allowed between field name and colon
+        if (raw_key[raw_key.len - 1] == ' ' or raw_key[raw_key.len - 1] == '\t') {
+            return error.InvalidHeaderColonWhitespace;
+        }
+        for (raw_key) |c| {
+            if (!isValidTokenChar(c)) return error.InvalidHeader;
+        }
+
+        const key = raw_key;
         const val = std.mem.trim(u8, line[colon_idx + 1 ..], " \t");
+        for (val) |c| {
+            if (c < 0x20 and c != '\t') return error.InvalidHeader;
+        }
 
-        try headers.add(key, val);
+        headers.add(key, val) catch |err| {
+            if (err == error.InvalidHeaderCharacter) return error.InvalidHeader;
+            return error.OutOfMemory;
+        };
 
-        if (std.ascii.eqlIgnoreCase(key, "content-length")) {
+        if (std.ascii.eqlIgnoreCase(key, "host")) {
+            host_count += 1;
+            if (host_count > 1) return error.DuplicateHostHeader;
+        } else if (std.ascii.eqlIgnoreCase(key, "content-length")) {
             const parsed_cl = std.fmt.parseInt(u64, val, 10) catch return error.InvalidContentLength;
             if (content_length) |existing| {
                 // RFC 9112 Section 6.3: Reject conflicting multiple Content-Lengths (Request Smuggling defense)
@@ -84,8 +113,25 @@ pub fn parseRequestHead(allocator: std.mem.Allocator, buffer: []const u8) ParseE
                 content_length = parsed_cl;
             }
         } else if (std.ascii.eqlIgnoreCase(key, "transfer-encoding")) {
-            if (std.ascii.findIgnoreCase(val, "chunked") != null) {
+            // RFC 9112 Section 6.1: Parse comma-separated list of transfer codings
+            var te_it = std.mem.splitScalar(u8, val, ',');
+            var last_token: ?[]const u8 = null;
+            while (te_it.next()) |raw_tok| {
+                const tok = std.mem.trim(u8, raw_tok, " \t");
+                if (tok.len == 0) continue;
+                last_token = tok;
+                // If it's not chunked, check if we understand it; if not, reject
+                if (!std.ascii.eqlIgnoreCase(tok, "chunked")) {
+                    return error.UnsupportedTransferEncoding;
+                }
+            }
+            if (last_token) |last| {
+                if (!std.ascii.eqlIgnoreCase(last, "chunked")) {
+                    return error.ChunkedNotFinalTransferEncoding;
+                }
                 is_chunked = true;
+            } else {
+                return error.UnsupportedTransferEncoding;
             }
         } else if (std.ascii.eqlIgnoreCase(key, "connection")) {
             connection_hdr = val;

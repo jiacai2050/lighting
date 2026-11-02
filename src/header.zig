@@ -1,5 +1,29 @@
 const std = @import("std");
 
+pub fn isValidTokenChar(c: u8) bool {
+    return switch (c) {
+        'a'...'z', 'A'...'Z', '0'...'9', '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
+        else => false,
+    };
+}
+
+pub fn isValidHeaderName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| {
+        if (!isValidTokenChar(c)) return false;
+    }
+    return true;
+}
+
+pub fn isValidHeaderValue(value: []const u8) bool {
+    for (value) |c| {
+        if (c == '\r' or c == '\n') return false;
+        if (c < 0x20 and c != '\t') return false;
+        if (c == 0x7f) return false;
+    }
+    return true;
+}
+
 /// HTTP Header entry
 pub const HeaderEntry = struct {
     name: []const u8,
@@ -32,6 +56,9 @@ pub const HeaderMap = struct {
     }
 
     pub fn set(self: *HeaderMap, name: []const u8, value: []const u8) !void {
+        if (!isValidHeaderName(name) or !isValidHeaderValue(value)) {
+            return error.InvalidHeaderCharacter;
+        }
         for (self.entries.items) |*entry| {
             if (std.ascii.eqlIgnoreCase(entry.name, name)) {
                 entry.value = value;
@@ -45,6 +72,9 @@ pub const HeaderMap = struct {
     }
 
     pub fn add(self: *HeaderMap, name: []const u8, value: []const u8) !void {
+        if (!isValidHeaderName(name) or !isValidHeaderValue(value)) {
+            return error.InvalidHeaderCharacter;
+        }
         try self.entries.append(self.allocator, .{
             .name = name,
             .value = value,

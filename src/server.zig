@@ -10,6 +10,7 @@ const io_util = @import("proto/io_util.zig");
 pub const ServerOptions = struct {
     handler: Handler,
     num_threads: usize = 64,
+    max_queue_size: usize = 1024,
     max_header_bytes: usize = 8 * 1024,
     read_timeout_ns: ?u64 = null,
     read_header_timeout_ns: ?u64 = null,
@@ -56,7 +57,7 @@ pub const Server = struct {
         self.listener = listener;
         self.running.store(true, .release);
 
-        self.pool = try ThreadPool.create(self.allocator, self.io, self.options.num_threads);
+        self.pool = try ThreadPool.create(self.allocator, self.io, self.options.num_threads, self.options.max_queue_size);
 
         while (self.running.load(.acquire)) {
             const stream = listener.accept(self.io) catch |err| {
@@ -73,7 +74,12 @@ pub const Server = struct {
 
             // Dispatch connection to worker pool
             self.pool.?.spawn(serveConnWorker, .{ self, stream }) catch |err| {
-                std.log.warn("spawn worker error (dropping connection): {}", .{err});
+                if (err == error.QueueFull) {
+                    const msg = [1][]const u8{"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n"};
+                    _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
+                } else {
+                    std.log.warn("spawn worker error (dropping connection): {}", .{err});
+                }
                 stream.close(self.io);
             };
         }
@@ -95,6 +101,16 @@ pub const Server = struct {
 
         // Keep-Alive connection loop
         while (self.running.load(.acquire)) {
+            // If connection is idle between requests and queue has pending tasks,
+            // don't hog the worker thread: close connection gracefully and yield thread to pending tasks
+            if (is_idle and buf_len == 0) {
+                if (self.pool) |p| {
+                    if (p.hasPendingTasks()) {
+                        return;
+                    }
+                }
+            }
+
             // 1. First check if complete HTTP headers already reside in buffer (Pipelining support)
             var head_end: ?usize = std.mem.indexOf(u8, conn_buf[0..buf_len], "\r\n\r\n");
             var header_deadline: ?std.Io.Timeout = null;
@@ -153,9 +169,14 @@ pub const Server = struct {
             defer arena.deinit();
             const req_allocator = arena.allocator();
 
-            const head = parseRequestHead(req_allocator, conn_buf[0..buf_len]) catch {
-                const msg = [1][]const u8{"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"};
-                _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
+            const head = parseRequestHead(req_allocator, conn_buf[0..buf_len]) catch |err| {
+                if (err == error.UnsupportedTransferEncoding) {
+                    const msg = [1][]const u8{"HTTP/1.1 501 Not Implemented\r\nConnection: close\r\n\r\n"};
+                    _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
+                } else {
+                    const msg = [1][]const u8{"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"};
+                    _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
+                }
                 return;
             };
 
@@ -189,6 +210,7 @@ pub const Server = struct {
                 self.io,
                 req_allocator,
                 head.keep_alive,
+                head.method == .HEAD,
             );
             res.setWriteTimeout(self.options.write_timeout_ns);
 
@@ -204,8 +226,8 @@ pub const Server = struct {
             // Finalize response
             res.finish() catch return;
 
-            // If keep-alive is false, close connection
-            if (!head.keep_alive) {
+            // If keep-alive is false (or disabled due to body mismatch), close connection
+            if (!head.keep_alive or !res.keep_alive) {
                 return;
             }
 

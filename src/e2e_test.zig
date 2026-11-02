@@ -34,7 +34,8 @@ test "e2e: GET, POST echo, and Keep-Alive" {
     });
     server.listener = listener;
     server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 2);
+    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
+    defer server.deinit();
     defer server.deinit();
 
     // Start server loop in separate thread
@@ -598,6 +599,237 @@ test "e2e: HTTP pipelining and RFC compliance (400 on missing Host, 204 No Conte
         const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
         const resp_str = resp_buf[0..n];
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "204 No Content") != null);
+    }
+
+    server.shutdown();
+    server_thread.join();
+}
+
+test "review: Finding 2 & 9 - RFC 9112 strict request line, headers, and Transfer-Encoding" {
+    const allocator = std.testing.allocator;
+
+    // 1. Request line with 4 tokens rejected
+    {
+        const raw = "GET / HTTP/1.1 EXTRA\r\nHost: localhost\r\n\r\n";
+        try std.testing.expectError(error.InvalidRequestLine, http.parseRequestHead(allocator, raw));
+    }
+
+    // 2. Whitespace before colon rejected (RFC 9112 Section 5.1)
+    {
+        const raw = "GET / HTTP/1.1\r\nHost : localhost\r\n\r\n";
+        try std.testing.expectError(error.InvalidHeaderColonWhitespace, http.parseRequestHead(allocator, raw));
+    }
+
+    // 3. Duplicate Host header rejected (RFC 9112 Section 7.1)
+    {
+        const raw = "GET / HTTP/1.1\r\nHost: a.com\r\nHost: b.com\r\n\r\n";
+        try std.testing.expectError(error.DuplicateHostHeader, http.parseRequestHead(allocator, raw));
+    }
+
+    // 4. Transfer-Encoding not-chunked rejected (Finding 2)
+    {
+        const raw = "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: not-chunked\r\n\r\n";
+        try std.testing.expectError(error.UnsupportedTransferEncoding, http.parseRequestHead(allocator, raw));
+    }
+
+    // 5. Transfer-Encoding chunked not final rejected (RFC 9112 Section 6.1)
+    {
+        const raw = "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked, gzip\r\n\r\n";
+        try std.testing.expectError(error.UnsupportedTransferEncoding, http.parseRequestHead(allocator, raw));
+    }
+
+    // 6. Valid Transfer-Encoding: chunked accepted
+    {
+        const raw = "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n";
+        const head = try http.parseRequestHead(allocator, raw);
+        var h = head.headers;
+        defer h.deinit();
+        try std.testing.expect(head.is_chunked);
+    }
+}
+
+test "review: Finding 6 - Response header CRLF and control character injection" {
+    var headers = http.HeaderMap.init(std.testing.allocator);
+    defer headers.deinit();
+
+    // 1. Value with CR/LF must be rejected
+    try std.testing.expectError(error.InvalidHeaderCharacter, headers.set("X-Bad", "hello\r\nInjected: true"));
+    try std.testing.expectError(error.InvalidHeaderCharacter, headers.add("X-Bad", "hello\nInjected: true"));
+
+    // 2. Name with space, colon, or control chars must be rejected
+    try std.testing.expectError(error.InvalidHeaderCharacter, headers.set("X Bad", "value"));
+    try std.testing.expectError(error.InvalidHeaderCharacter, headers.set("X:Bad", "value"));
+    try std.testing.expectError(error.InvalidHeaderCharacter, headers.set("X\x00Bad", "value"));
+
+    // 3. Valid headers succeed
+    try headers.set("X-Good-Header", "standard value 123 !");
+    try std.testing.expectEqualStrings("standard value 123 !", headers.get("X-Good-Header").?);
+}
+
+test "review: Finding 7 - ThreadPool QueueFull backpressure and error recovery" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Pool with 1 thread, max queue size 1
+    const pool = try http.ThreadPool.create(allocator, io, 1, 1);
+    defer pool.destroy();
+
+    const Blocker = struct {
+        fn run(io_ctx: std.Io) void {
+            io_ctx.sleep(.{ .nanoseconds = 50 * std.time.ns_per_ms }, .boot) catch {};
+        }
+    };
+
+    // 1. Task occupying the single worker
+    try pool.spawn(Blocker.run, .{io});
+    // Give it a tiny moment to pick up
+    try io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .boot);
+
+    // 2. Queue the single permitted task
+    try pool.spawn(Blocker.run, .{io});
+
+    // 3. Queue is now full: next spawn must fail with QueueFull
+    try std.testing.expectError(error.QueueFull, pool.spawn(Blocker.run, .{io}));
+
+    // Wait for tasks to drain cleanly
+    try io.sleep(.{ .nanoseconds = 120 * std.time.ns_per_ms }, .boot);
+    try std.testing.expect(!pool.hasPendingTasks());
+}
+
+test "review: Finding 4, 5, 10 - HEAD suppression, 204 suppression, Content-Length guards" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    // Endpoint for HEAD test (writes body, but HEAD must suppress it while keeping Content-Length)
+    try mux.handleFunc("GET /head_test", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            try w.header().set("Content-Type", "text/plain");
+            try w.writeAll("0123456789");
+        }
+    }.handle);
+
+    // Endpoint for 204 test (tries to write body, but 204 must suppress it and omit Content-Length)
+    try mux.handleFunc("GET /204_suppress", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            w.writeHeader(.no_content);
+            try w.writeAll("this body must be suppressed");
+        }
+    }.handle);
+
+    // Endpoint for Content-Length guard (declares 5, but writes 10 -> should fail)
+    try mux.handleFunc("GET /cl_overflow", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            try w.header().set("Content-Length", "5");
+            _ = try w.write("12345");
+            _ = w.write("extra_bytes") catch |err| {
+                if (err == error.ContentLengthExceeded) {
+                    return;
+                }
+                return err;
+            };
+        }
+    }.handle);
+
+    const port: u16 = 19100;
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+
+    var server = http.Server.init(allocator, .{
+        .handler = mux.handler(),
+        .num_threads = 2,
+    });
+    server.listener = listener;
+    server.running.store(true, .release);
+    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: *std.Io.net.Server) void {
+            while (s.running.load(.acquire)) {
+                const stream = l.accept(s.io) catch break;
+                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
+                    stream.close(s.io);
+                };
+            }
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+
+    // 1. Verify HEAD suppresses body while emitting Content-Length
+    {
+        var client_stream = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client_stream.close(io);
+
+        const req = "HEAD /head_test HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client_stream.socket.handle, .data = &vec } })).net_write;
+
+        var resp_buf: [1024]u8 = undefined;
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+        }
+        const resp_str = resp_buf[0..total_read];
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "Content-Length: 10") != null);
+        const header_end = std.mem.indexOf(u8, resp_str, "\r\n\r\n").?;
+        const body_part = resp_str[header_end + 4 ..];
+        try std.testing.expectEqual(@as(usize, 0), body_part.len);
+    }
+
+    // 2. Verify 204 suppresses body even if handler attempted to write it
+    {
+        var client_stream = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client_stream.close(io);
+
+        const req = "GET /204_suppress HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client_stream.socket.handle, .data = &vec } })).net_write;
+
+        var resp_buf: [1024]u8 = undefined;
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+        }
+        const resp_str = resp_buf[0..total_read];
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "204 No Content") != null);
+        try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "content-length") == null);
+        const header_end = std.mem.indexOf(u8, resp_str, "\r\n\r\n").?;
+        const body_part = resp_str[header_end + 4 ..];
+        try std.testing.expectEqual(@as(usize, 0), body_part.len);
+    }
+
+    // 3. Verify Content-Length overflow guard
+    {
+        var client_stream = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client_stream.close(io);
+
+        const req = "GET /cl_overflow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client_stream.socket.handle, .data = &vec } })).net_write;
+
+        var resp_buf: [1024]u8 = undefined;
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+        }
+        const resp_str = resp_buf[0..total_read];
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "Content-Length: 5") != null);
     }
 
     server.shutdown();
