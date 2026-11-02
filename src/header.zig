@@ -107,11 +107,23 @@ pub const HeaderMap = struct {
         }
     }
 
+    pub fn deinitCloned(self: *HeaderMap) void {
+        for (self.entries.items) |item| {
+            self.allocator.free(item.name);
+            self.allocator.free(item.value);
+        }
+        self.deinit();
+    }
+
     pub fn clone(self: *const HeaderMap, allocator: std.mem.Allocator) !HeaderMap {
         var new_map = HeaderMap.init(allocator);
+        errdefer new_map.deinitCloned();
+
         for (self.entries.items) |item| {
             const name_dup = try allocator.dupe(u8, item.name);
+            errdefer allocator.free(name_dup);
             const val_dup = try allocator.dupe(u8, item.value);
+            errdefer allocator.free(val_dup);
             try new_map.add(name_dup, val_dup);
         }
         return new_map;
@@ -144,4 +156,24 @@ test "HeaderMap basic operations" {
     try std.testing.expectEqual(@as(usize, 1), headers.entries.items.len);
     try std.testing.expect(headers.get("X-Custom") == null);
     try std.testing.expect(!headers.has("x-custom"));
+}
+
+test "HeaderMap clone and error cleanup" {
+    const allocator = std.testing.allocator;
+    var headers = HeaderMap.init(allocator);
+    defer headers.deinit();
+
+    try headers.set("Host", "example.com");
+    try headers.add("Accept", "text/html");
+    try headers.add("Accept", "application/xhtml+xml");
+
+    var cloned = try headers.clone(allocator);
+    defer cloned.deinitCloned();
+
+    try std.testing.expectEqual(@as(usize, 3), cloned.entries.items.len);
+    try std.testing.expectEqualStrings("example.com", cloned.get("host").?);
+
+    // Test failing allocator error handling to ensure no leaks
+    var failing_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 2 });
+    try std.testing.expectError(error.OutOfMemory, headers.clone(failing_alloc.allocator()));
 }

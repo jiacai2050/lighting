@@ -6,23 +6,47 @@ const BodyReader = @import("proto/chunk_reader.zig").BodyReader;
 
 pub const URL = struct {
     raw: []const u8,
+    host: ?[]const u8 = null,
     path: []const u8,
-    raw_query: ?[]const u8,
+    raw_query: ?[]const u8 = null,
 
     pub fn parse(target: []const u8) URL {
+        var raw_path = target;
+        var raw_query: ?[]const u8 = null;
         if (std.mem.indexOfScalar(u8, target, '?')) |q_idx| {
-            return .{
-                .raw = target,
-                .path = target[0..q_idx],
-                .raw_query = target[q_idx + 1 ..],
-            };
-        } else {
-            return .{
-                .raw = target,
-                .path = target,
-                .raw_query = null,
-            };
+            raw_path = target[0..q_idx];
+            raw_query = target[q_idx + 1 ..];
         }
+
+        var host: ?[]const u8 = null;
+        var path = raw_path;
+
+        if (std.ascii.startsWithIgnoreCase(raw_path, "http://")) {
+            const rest = raw_path["http://".len..];
+            if (std.mem.indexOfScalar(u8, rest, '/')) |slash_idx| {
+                host = rest[0..slash_idx];
+                path = rest[slash_idx..];
+            } else {
+                host = rest;
+                path = "/";
+            }
+        } else if (std.ascii.startsWithIgnoreCase(raw_path, "https://")) {
+            const rest = raw_path["https://".len..];
+            if (std.mem.indexOfScalar(u8, rest, '/')) |slash_idx| {
+                host = rest[0..slash_idx];
+                path = rest[slash_idx..];
+            } else {
+                host = rest;
+                path = "/";
+            }
+        }
+
+        return .{
+            .raw = target,
+            .host = host,
+            .path = path,
+            .raw_query = raw_query,
+        };
     }
 
     pub fn queryParam(self: URL, key: []const u8) ?[]const u8 {
@@ -166,4 +190,37 @@ test "URL parse and queryParam" {
     const unescaped = try URL.unescape(allocator, "hello+world%21%20%2F");
     defer allocator.free(unescaped);
     try std.testing.expectEqualStrings("hello world! /", unescaped);
+}
+
+test "URL parse absolute-form targets" {
+    // 1. With path and query
+    const url1 = URL.parse("http://example.com:8080/path/sub?foo=bar");
+    try std.testing.expectEqualStrings("example.com:8080", url1.host.?);
+    try std.testing.expectEqualStrings("/path/sub", url1.path);
+    try std.testing.expectEqualStrings("foo=bar", url1.raw_query.?);
+    try std.testing.expectEqualStrings("bar", url1.queryParam("foo").?);
+
+    // 2. HTTPS with path and no query
+    const url2 = URL.parse("https://myhost.org/api/v1");
+    try std.testing.expectEqualStrings("myhost.org", url2.host.?);
+    try std.testing.expectEqualStrings("/api/v1", url2.path);
+    try std.testing.expect(url2.raw_query == null);
+
+    // 3. No path (RFC 9112: path defaults to "/")
+    const url3 = URL.parse("http://example.com");
+    try std.testing.expectEqualStrings("example.com", url3.host.?);
+    try std.testing.expectEqualStrings("/", url3.path);
+    try std.testing.expect(url3.raw_query == null);
+
+    // 4. No path, with query
+    const url4 = URL.parse("http://example.com?key=val");
+    try std.testing.expectEqualStrings("example.com", url4.host.?);
+    try std.testing.expectEqualStrings("/", url4.path);
+    try std.testing.expectEqualStrings("key=val", url4.raw_query.?);
+    try std.testing.expectEqualStrings("val", url4.queryParam("key").?);
+
+    // 5. Trailing slash
+    const url5 = URL.parse("http://example.com/");
+    try std.testing.expectEqualStrings("example.com", url5.host.?);
+    try std.testing.expectEqualStrings("/", url5.path);
 }

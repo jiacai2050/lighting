@@ -1685,3 +1685,135 @@ test "review round 3: Finding 6 - RFC 9112 request-target rejection in live serv
     server.shutdown();
     server_thread.join();
 }
+
+test "e2e: absolute-form request targets and routing (Finding 3)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    const Handlers = struct {
+        fn proxyTest(w: *http.ResponseWriter, req: *http.Request) anyerror!void {
+            _ = req;
+            try w.writeAll("proxy-ok");
+        }
+
+        fn queryTest(w: *http.ResponseWriter, req: *http.Request) anyerror!void {
+            const val = req.url.queryParam("name") orelse "none";
+            try w.writeAll(val);
+        }
+
+        fn rootTest(w: *http.ResponseWriter, req: *http.Request) anyerror!void {
+            _ = req;
+            try w.writeAll("root-ok");
+        }
+    };
+
+    try mux.handleFunc("example.com/proxy_test", Handlers.proxyTest);
+    try mux.handleFunc("/query", Handlers.queryTest);
+    try mux.handleFunc("/", Handlers.rootTest);
+
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var server = http.Server.init(allocator, .{
+        .handler = mux.handler(),
+        .num_threads = 2,
+    });
+    server.listener = listener;
+    server.running.store(true, .release);
+    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: *std.Io.net.Server) void {
+            while (s.running.load(.acquire)) {
+                const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
+                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
+                    stream.close(s.io);
+                };
+            }
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+
+    // 1. Absolute-form target matches host-qualified pattern, ignoring different Host header
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET http://example.com/proxy_test HTTP/1.1\r\nHost: other.com\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var resp_buf: [512]u8 = undefined;
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+        }
+        const resp_str = resp_buf[0..total_read];
+
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "proxy-ok") != null);
+    }
+
+    // 2. Absolute-form target with query matches generic path and parses query
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET http://myserver.org:8080/query?name=alice HTTP/1.1\r\nHost: myserver.org:8080\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var resp_buf: [512]u8 = undefined;
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+        }
+        const resp_str = resp_buf[0..total_read];
+
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "alice") != null);
+    }
+
+    // 3. Absolute-form target without path defaults to "/" (RFC 9112 Section 3.2.2)
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET http://example.com HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var resp_buf: [512]u8 = undefined;
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+        }
+        const resp_str = resp_buf[0..total_read];
+
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "root-ok") != null);
+    }
+
+    server.shutdown();
+    server_thread.join();
+}

@@ -164,6 +164,44 @@ pub fn stripHostPort(host: []const u8) []const u8 {
     return host;
 }
 
+pub const NormalizedHost = struct {
+    slice: []const u8,
+    allocated: ?[]u8 = null,
+
+    pub fn deinit(self: NormalizedHost, allocator: std.mem.Allocator) void {
+        if (self.allocated) |b| {
+            allocator.free(b);
+        }
+    }
+};
+
+pub fn normalizeHost(allocator: std.mem.Allocator, host: []const u8, stack_buf: *[256]u8) NormalizedHost {
+    const stripped = stripHostPort(host);
+    if (stripped.len <= stack_buf.len) {
+        for (stripped, 0..) |c, i| {
+            stack_buf[i] = std.ascii.toLower(c);
+        }
+        return .{
+            .slice = stack_buf[0..stripped.len],
+            .allocated = null,
+        };
+    }
+    if (allocator.alloc(u8, stripped.len)) |dyn| {
+        for (stripped, 0..) |c, i| {
+            dyn[i] = std.ascii.toLower(c);
+        }
+        return .{
+            .slice = dyn,
+            .allocated = dyn,
+        };
+    } else |_| {
+        return .{
+            .slice = stripped,
+            .allocated = null,
+        };
+    }
+}
+
 pub fn normalizeHostStack(host: []const u8, buf: *[256]u8) []const u8 {
     const stripped = stripHostPort(host);
     if (stripped.len <= buf.len) {
@@ -309,8 +347,10 @@ pub const ServeMux = struct {
         // 1. Host match
         if (host) |h| {
             var h_buf: [256]u8 = undefined;
-            const h_name = normalizeHostStack(h, &h_buf);
-            if (self.root.children.get(h_name)) |hn| {
+            const norm = normalizeHost(allocator, h, &h_buf);
+            defer norm.deinit(allocator);
+
+            if (self.root.children.get(norm.slice)) |hn| {
                 if (matchMethodAndPath(hn, allocator, method, path, matches)) |res| {
                     return res;
                 }
@@ -381,8 +421,10 @@ pub const ServeMux = struct {
     ) !void {
         if (host) |h| {
             var h_buf: [256]u8 = undefined;
-            const h_name = normalizeHostStack(h, &h_buf);
-            if (self.root.children.get(h_name)) |hn| {
+            const norm = normalizeHost(allocator, h, &h_buf);
+            defer norm.deinit(allocator);
+
+            if (self.root.children.get(norm.slice)) |hn| {
                 try collectFromHostNode(hn, allocator, path, out);
             }
         }
@@ -439,7 +481,7 @@ pub const ServeMux = struct {
     }
 
     pub fn serveHTTP(self: *ServeMux, w: *ResponseWriter, req: *Request) anyerror!void {
-        const host = req.headers.get("host");
+        const host = req.url.host orelse req.headers.get("host");
         const method = req.method.asString();
         const path = req.url.path;
 
@@ -614,4 +656,39 @@ test "ServeMux routing: Host case-insensitivity and IPv6 port stripping (Finding
         const res = mux.matchTree(allocator, "[::1]", "GET", "/ipv6", &matches);
         try std.testing.expect(res != null);
     }
+}
+
+test "ServeMux matches long host > 256 bytes case-insensitively" {
+    const allocator = std.testing.allocator;
+    var mux = ServeMux.init(allocator);
+    defer mux.deinit();
+
+    const dummy = struct {
+        fn handle(w: *ResponseWriter, req: *Request) anyerror!void {
+            _ = w;
+            _ = req;
+        }
+    }.handle;
+
+    // Create a 300-byte host name
+    var long_host_lower: [300]u8 = undefined;
+    var long_host_upper: [300]u8 = undefined;
+    for (0..300) |i| {
+        long_host_lower[i] = 'a' + @as(u8, @intCast(i % 26));
+        long_host_upper[i] = std.ascii.toUpper(long_host_lower[i]);
+    }
+
+    // Register with lowercase: "<long_host>/long"
+    var reg_pattern: [305]u8 = undefined;
+    @memcpy(reg_pattern[0..300], &long_host_lower);
+    @memcpy(reg_pattern[300..], "/long");
+
+    try mux.handleFunc(&reg_pattern, dummy);
+
+    // Match with uppercase host
+    var matches = std.ArrayListUnmanaged([]const u8).empty;
+    defer matches.deinit(allocator);
+
+    const res = mux.matchTree(allocator, &long_host_upper, "GET", "/long", &matches);
+    try std.testing.expect(res != null);
 }

@@ -22,10 +22,15 @@ pub const ThreadPool = struct {
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, num_threads: usize, max_queue_size: usize) !*ThreadPool {
         const self = try allocator.create(ThreadPool);
+        errdefer allocator.destroy(self);
+
         const actual_threads = if (num_threads == 0) 4 else num_threads;
+        const threads = try allocator.alloc(std.Thread, actual_threads);
+        errdefer allocator.free(threads);
+
         self.* = .{
             .allocator = allocator,
-            .threads = try allocator.alloc(std.Thread, actual_threads),
+            .threads = threads,
             .queue = .empty,
             .queue_head = 0,
             .max_queue_size = if (max_queue_size == 0) 1024 else max_queue_size,
@@ -35,8 +40,18 @@ pub const ThreadPool = struct {
             .io = io,
         };
 
+        var spawned: usize = 0;
+        errdefer {
+            self.running.store(false, .release);
+            self.cond.broadcast(self.io);
+            for (self.threads[0..spawned]) |t| {
+                t.join();
+            }
+        }
+
         for (self.threads) |*t| {
             t.* = try std.Thread.spawn(.{}, workerLoop, .{self});
+            spawned += 1;
         }
         return self;
     }
@@ -208,4 +223,17 @@ test "ThreadPool: pending tasks in queue are properly canceled on destroy (Findi
 
     // 3. destroy() must cancel all unexecuted tasks, free their closures, and exit without leak
     pool.destroy();
+}
+
+test "ThreadPool: create failure cleans up self and threads without leaks" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // 1. Fail on first allocation (ThreadPool struct)
+    var failing_alloc1 = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, ThreadPool.create(failing_alloc1.allocator(), io, 2, 1024));
+
+    // 2. Fail on second allocation (threads array)
+    var failing_alloc2 = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    try std.testing.expectError(error.OutOfMemory, ThreadPool.create(failing_alloc2.allocator(), io, 2, 1024));
 }
