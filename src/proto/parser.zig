@@ -70,6 +70,27 @@ pub fn parseRequestHead(allocator: std.mem.Allocator, buffer: []const u8) ParseE
     const method = Method.parse(method_str) orelse return error.InvalidMethod;
     const version = Version.parse(version_str) orelse return error.InvalidVersion;
 
+    // RFC 9112 Section 3.2: Validate request-target
+    for (target) |c| {
+        if (c <= 0x20 or c == 0x7f) return error.InvalidTarget;
+    }
+
+    if (std.mem.eql(u8, target, "*")) {
+        if (method != .OPTIONS) return error.InvalidTarget;
+    } else if (method == .CONNECT) {
+        // CONNECT requires authority-form (e.g. "example.com:443", must not start with '/')
+        if (target[0] == '/' or std.ascii.startsWithIgnoreCase(target, "http://") or std.ascii.startsWithIgnoreCase(target, "https://")) {
+            return error.InvalidTarget;
+        }
+    } else if (target[0] == '/') {
+        // origin-form: valid for all methods except CONNECT
+    } else if (std.ascii.startsWithIgnoreCase(target, "http://") or std.ascii.startsWithIgnoreCase(target, "https://")) {
+        // absolute-form: valid
+    } else {
+        // Non-standard or disallowed form
+        return error.InvalidTarget;
+    }
+
     var headers = HeaderMap.init(allocator);
     errdefer headers.deinit();
 
@@ -244,4 +265,61 @@ test "parseRequestHead RFC compliance: Transfer-Encoding chunked validation" {
     var h = head.headers;
     defer h.deinit();
     try std.testing.expectEqual(true, head.is_chunked);
+}
+
+test "parseRequestHead RFC compliance: request-target forms validation (Finding 6)" {
+    const allocator = std.testing.allocator;
+
+    // 1. origin-form is valid
+    {
+        const raw = "GET /path/to/resource?query=1 HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        const head = try parseRequestHead(allocator, raw);
+        var h = head.headers;
+        defer h.deinit();
+        try std.testing.expectEqualStrings("/path/to/resource?query=1", head.target);
+    }
+
+    // 2. absolute-form is valid
+    {
+        const raw = "GET http://example.com/index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        const head = try parseRequestHead(allocator, raw);
+        var h = head.headers;
+        defer h.deinit();
+        try std.testing.expectEqualStrings("http://example.com/index.html", head.target);
+    }
+
+    // 3. asterisk-form is valid ONLY for OPTIONS
+    {
+        const opt_raw = "OPTIONS * HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        const head = try parseRequestHead(allocator, opt_raw);
+        var h = head.headers;
+        defer h.deinit();
+        try std.testing.expectEqualStrings("*", head.target);
+
+        const get_raw = "GET * HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        try std.testing.expectError(error.InvalidTarget, parseRequestHead(allocator, get_raw));
+    }
+
+    // 4. authority-form is valid ONLY for CONNECT
+    {
+        const conn_raw = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
+        const head = try parseRequestHead(allocator, conn_raw);
+        var h = head.headers;
+        defer h.deinit();
+        try std.testing.expectEqualStrings("example.com:443", head.target);
+
+        // CONNECT with origin-form is invalid
+        const conn_bad = "CONNECT /path HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        try std.testing.expectError(error.InvalidTarget, parseRequestHead(allocator, conn_bad));
+
+        // GET with authority-form is invalid
+        const get_auth = "GET example.com:80 HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        try std.testing.expectError(error.InvalidTarget, parseRequestHead(allocator, get_auth));
+    }
+
+    // 5. Control character in target is rejected
+    {
+        const bad_char = "GET /bad\x01path HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        try std.testing.expectError(error.InvalidTarget, parseRequestHead(allocator, bad_char));
+    }
 }

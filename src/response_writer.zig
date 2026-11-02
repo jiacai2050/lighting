@@ -2,6 +2,7 @@ const std = @import("std");
 const Status = @import("proto/status.zig").Status;
 const HeaderMap = @import("header.zig").HeaderMap;
 const io_util = @import("proto/io_util.zig");
+const Version = @import("proto/parser.zig").Version;
 
 pub const ResponseWriter = struct {
     stream: std.Io.net.Stream,
@@ -10,6 +11,7 @@ pub const ResponseWriter = struct {
     headers: HeaderMap,
     status_code: Status = .ok,
     header_written: bool = false,
+    version: Version = .@"HTTP/1.1",
     keep_alive: bool = true,
     is_head: bool = false,
     bytes_written: u64 = 0,
@@ -24,6 +26,7 @@ pub const ResponseWriter = struct {
         stream: std.Io.net.Stream,
         io: std.Io,
         arena: std.mem.Allocator,
+        version: Version,
         keep_alive: bool,
         is_head: bool,
     ) ResponseWriter {
@@ -32,6 +35,7 @@ pub const ResponseWriter = struct {
             .io = io,
             .arena = arena,
             .headers = HeaderMap.init(arena),
+            .version = version,
             .keep_alive = keep_alive,
             .is_head = is_head,
             .bytes_written = 0,
@@ -99,9 +103,14 @@ pub const ResponseWriter = struct {
         if (!self.header_written) {
             // Need to flush headers. Since data didn't fit, check if user provided Content-Length
             if (self.headers.get("content-length") == null) {
-                // Fallback to Chunked mode!
-                self.chunked_mode = true;
-                try self.headers.set("Transfer-Encoding", "chunked");
+                if (self.version == .@"HTTP/1.1") {
+                    self.chunked_mode = true;
+                    try self.headers.set("Transfer-Encoding", "chunked");
+                } else {
+                    // HTTP/1.0 does not support chunked; must close on EOF
+                    self.chunked_mode = false;
+                    self.keep_alive = false;
+                }
             }
             try self.flushHeaders();
         }
@@ -176,9 +185,16 @@ pub const ResponseWriter = struct {
             }
         }
 
-        // Format Status Line: "HTTP/1.1 200 OK\r\n"
+        // RFC 9112 Section 6.1: HTTP/1.0 does not support chunked
+        if (self.version == .@"HTTP/1.0") {
+            self.headers.delete("Transfer-Encoding");
+            self.chunked_mode = false;
+        }
+
+        // Format Status Line: e.g. "HTTP/1.1 200 OK\r\n" or "HTTP/1.0 200 OK\r\n"
         var line_buf: [64]u8 = undefined;
-        const status_line = std.fmt.bufPrint(&line_buf, "HTTP/1.1 {d} {s}\r\n", .{
+        const status_line = std.fmt.bufPrint(&line_buf, "{s} {d} {s}\r\n", .{
+            self.version.asString(),
             self.status_code.code(),
             self.status_code.phrase(),
         }) catch unreachable;
@@ -237,6 +253,21 @@ pub const ResponseWriter = struct {
     /// Called at the end of the request handler execution
     pub fn finish(self: *ResponseWriter) !void {
         const body_allowed = allowsBody(self.status_code);
+
+        // Check if actual written + buffered is less than user-specified Content-Length
+        // MUST check before flushHeaders() so we don't advertise Connection: keep-alive
+        if (body_allowed and !self.is_head and !self.chunked_mode) {
+            if (self.headers.get("content-length")) |cl_str| {
+                if (std.fmt.parseInt(u64, cl_str, 10)) |cl| {
+                    if (self.bytes_written + self.buffer_len < cl) {
+                        // Body truncated by handler; force Connection: close
+                        self.keep_alive = false;
+                        self.headers.delete("Connection");
+                        try self.headers.set("Connection", "close");
+                    }
+                } else |_| {}
+            }
+        }
 
         if (!self.header_written) {
             // Response fit completely inside buffer or is HEAD / 204

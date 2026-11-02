@@ -16,6 +16,7 @@ pub const ThreadPool = struct {
 
     pub const Task = struct {
         runFn: *const fn (*anyopaque) void,
+        cancelFn: *const fn (*anyopaque) void,
         ctx: *anyopaque,
     };
 
@@ -75,12 +76,26 @@ pub const ThreadPool = struct {
         const Closure = struct {
             arguments: Args,
             allocator: std.mem.Allocator,
+            io: std.Io,
 
             fn run(ctx: *anyopaque) void {
                 const closure: *@This() = @ptrCast(@alignCast(ctx));
                 const alloc = closure.allocator;
                 defer alloc.destroy(closure);
                 @call(.auto, fn_ptr, closure.arguments);
+            }
+
+            fn cancel(ctx: *anyopaque) void {
+                const closure: *@This() = @ptrCast(@alignCast(ctx));
+                const alloc = closure.allocator;
+                const io = closure.io;
+                defer alloc.destroy(closure);
+                inline for (@typeInfo(Args).@"struct".field_names, @typeInfo(Args).@"struct".field_types) |field_name, field_type| {
+                    if (field_type == std.Io.net.Stream) {
+                        const stream = @field(closure.arguments, field_name);
+                        stream.close(io);
+                    }
+                }
             }
         };
 
@@ -89,10 +104,12 @@ pub const ThreadPool = struct {
         closure.* = .{
             .arguments = args,
             .allocator = self.allocator,
+            .io = self.io,
         };
 
         const task = Task{
             .runFn = Closure.run,
+            .cancelFn = Closure.cancel,
             .ctx = closure,
         };
 
@@ -132,6 +149,11 @@ pub const ThreadPool = struct {
         self.allocator.free(self.threads);
 
         self.mutex.lockUncancelable(self.io);
+        while (self.queue_head < self.queue.items.len) {
+            const task = self.queue.items[self.queue_head];
+            self.queue_head += 1;
+            task.cancelFn(task.ctx);
+        }
         self.queue.deinit(self.allocator);
         self.mutex.unlock(self.io);
 
@@ -159,4 +181,31 @@ test "ThreadPool execution" {
         try io.sleep(.{ .nanoseconds = 1000 * 1000 }, .boot);
     }
     try std.testing.expectEqual(@as(usize, 10), counter.load(.acquire));
+}
+
+test "ThreadPool: pending tasks in queue are properly canceled on destroy (Finding 1)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Pool with 1 thread
+    const pool = try ThreadPool.create(allocator, io, 1, 1024);
+
+    const Blocker = struct {
+        fn run(io_ctx: std.Io) void {
+            io_ctx.sleep(.{ .nanoseconds = 100 * std.time.ns_per_ms }, .boot) catch {};
+        }
+    };
+
+    // 1. First task blocks the single worker thread
+    try pool.spawn(Blocker.run, .{io});
+
+    // 2. Queue multiple tasks behind it
+    for (0..10) |_| {
+        try pool.spawn(Blocker.run, .{io});
+    }
+
+    try std.testing.expect(pool.hasPendingTasks());
+
+    // 3. destroy() must cancel all unexecuted tasks, free their closures, and exit without leak
+    pool.destroy();
 }

@@ -20,7 +20,7 @@ pub const ServerOptions = struct {
 
 pub const Server = struct {
     pub const ConnNode = struct {
-        handle: std.posix.fd_t,
+        stream: std.Io.net.Stream,
         prev: ?*ConnNode = null,
         next: ?*ConnNode = null,
     };
@@ -64,7 +64,7 @@ pub const Server = struct {
         self.active_conns_mutex.lockUncancelable(self.io);
         var curr = self.active_conns_head;
         while (curr) |node| {
-            _ = std.c.shutdown(node.handle, 2);
+            node.stream.shutdown(self.io, .both) catch {};
             curr = node.next;
         }
         self.active_conns_mutex.unlock(self.io);
@@ -135,10 +135,10 @@ pub const Server = struct {
     }
 
     pub fn serveConn(self: *Server, stream: std.Io.net.Stream) void {
-        var conn_node = ConnNode{ .handle = stream.socket.handle };
+        defer stream.close(self.io);
+        var conn_node = ConnNode{ .stream = stream };
         self.registerConnNode(&conn_node);
         defer self.unregisterConnNode(&conn_node);
-        defer stream.close(self.io);
 
         // Allocate a dedicated connection read buffer (e.g. 8KB)
         const conn_buf = self.allocator.alloc(u8, self.options.max_header_bytes) catch return;
@@ -274,6 +274,7 @@ pub const Server = struct {
                 stream,
                 self.io,
                 req_allocator,
+                head.version,
                 head.keep_alive,
                 head.method == .HEAD,
             );
@@ -287,6 +288,11 @@ pub const Server = struct {
                 res.keep_alive = false;
                 if (!res.header_written) {
                     res.setStatus(.internal_server_error);
+                    res.headers.delete("Content-Length");
+                    res.headers.delete("Transfer-Encoding");
+                    res.headers.delete("Connection");
+                    res.headers.set("Connection", "close") catch {};
+                    res.buffer_len = 0;
                     res.writeAll("500 Internal Server Error\n") catch {};
                 }
             };

@@ -1,6 +1,7 @@
 const std = @import("std");
 const io_util = @import("io_util.zig");
 const isValidTokenChar = @import("../header.zig").isValidTokenChar;
+const isValidHeaderValue = @import("../header.zig").isValidHeaderValue;
 
 /// A stream body reader that supports fixed Content-Length reading
 /// and handles reading out of the initial buffer first.
@@ -141,6 +142,7 @@ pub const BodyReader = struct {
                 break;
             }
             if (b == '\r') {
+                if (cr_seen) return error.InvalidTrailerCRLF; // Duplicate \r forbidden
                 cr_seen = true;
                 continue;
             }
@@ -160,6 +162,10 @@ pub const BodyReader = struct {
         for (raw_name) |c| {
             if (!isValidTokenChar(c)) return error.InvalidTrailerHeader;
         }
+
+        // Validate trailer field-value characters (no control characters, obs-text and VCHAR only)
+        const raw_val = out_buf[colon_idx + 1 .. len];
+        if (!isValidHeaderValue(raw_val)) return error.InvalidTrailerHeader;
 
         // RFC 9110 Section 6.5.1: Forbidden trailer fields
         if (std.ascii.eqlIgnoreCase(raw_name, "transfer-encoding") or
@@ -193,6 +199,7 @@ pub const BodyReader = struct {
                 break;
             }
             if (b == '\r') {
+                if (cr_seen) return error.InvalidChunkCRLF; // Duplicate \r forbidden
                 cr_seen = true;
                 continue;
             }
@@ -339,5 +346,31 @@ test "BodyReader: chunk trailer parsing and validation" {
         var buf: [16]u8 = undefined;
         _ = try reader.read(&buf);
         try std.testing.expectError(error.InvalidTrailerHeader, reader.read(&buf));
+    }
+
+    // 6. Duplicate \r in trailer line is rejected (Finding 4)
+    {
+        const raw = "5\r\nhello\r\n0\r\nX-Checksum: abc123\r\r\n\r\n";
+        var reader = BodyReader.init(dummy_stream, io, raw, null, true);
+        var buf: [16]u8 = undefined;
+        _ = try reader.read(&buf);
+        try std.testing.expectError(error.InvalidTrailerCRLF, reader.read(&buf));
+    }
+
+    // 7. Control character in trailer value is rejected (Finding 4)
+    {
+        const raw = "5\r\nhello\r\n0\r\nX-Checksum: bad\x01value\r\n\r\n";
+        var reader = BodyReader.init(dummy_stream, io, raw, null, true);
+        var buf: [16]u8 = undefined;
+        _ = try reader.read(&buf);
+        try std.testing.expectError(error.InvalidTrailerHeader, reader.read(&buf));
+    }
+
+    // 8. Duplicate \r in chunk size line is rejected (Finding 4)
+    {
+        const raw = "5\r\r\nhello\r\n0\r\n\r\n";
+        var reader = BodyReader.init(dummy_stream, io, raw, null, true);
+        var buf: [16]u8 = undefined;
+        try std.testing.expectError(error.InvalidChunkCRLF, reader.read(&buf));
     }
 }

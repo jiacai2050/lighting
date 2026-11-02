@@ -945,7 +945,7 @@ test "review round 2: Finding 2 - worker pool yields idle keep-alive connection 
 
     var resp_buf: [256]u8 = undefined;
     var r_vec = [1][]u8{&resp_buf};
-    var n = (try (try io.operate(.{ .net_read = .{ .socket_handle = c1.socket.handle, .data = &r_vec } })).net_read).data_len;
+    const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = c1.socket.handle, .data = &r_vec } })).net_read).data_len;
     try std.testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "200 OK") != null);
 
     // Client 1 remains idle without sending anything more.
@@ -959,9 +959,16 @@ test "review round 2: Finding 2 - worker pool yields idle keep-alive connection 
     _ = try (try io.operate(.{ .net_write = .{ .socket_handle = c2.socket.handle, .data = &vec2 } })).net_write;
 
     var resp_buf2: [256]u8 = undefined;
-    var r_vec2 = [1][]u8{&resp_buf2};
-    n = (try (try io.operate(.{ .net_read = .{ .socket_handle = c2.socket.handle, .data = &r_vec2 } })).net_read).data_len;
-    try std.testing.expect(std.mem.indexOf(u8, resp_buf2[0..n], "task-done") != null);
+    var total_read2: usize = 0;
+    while (total_read2 < resp_buf2.len) {
+        var r_vec2 = [1][]u8{resp_buf2[total_read2..]};
+        const res = io.operate(.{ .net_read = .{ .socket_handle = c2.socket.handle, .data = &r_vec2 } }) catch break;
+        const nr = res.net_read catch break;
+        if (nr.data_len == 0) break;
+        total_read2 += nr.data_len;
+        if (std.mem.indexOf(u8, resp_buf2[0..total_read2], "task-done") != null) break;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, resp_buf2[0..total_read2], "task-done") != null);
 
     server.shutdown();
     server_thread.join();
@@ -1015,15 +1022,23 @@ test "review round 2: Finding 3 - handler error forces Connection: close and pre
     _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
 
     var resp_buf: [512]u8 = undefined;
-    var r_vec = [1][]u8{&resp_buf};
-    const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
-    const resp_str = resp_buf[0..n];
+    var total_read: usize = 0;
+    while (total_read < resp_buf.len) {
+        var r_vec = [1][]u8{resp_buf[total_read..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        total_read += n;
+        if (std.mem.indexOf(u8, resp_buf[0..total_read], "500 Internal Server Error\n") != null) break;
+    }
+    const resp_str = resp_buf[0..total_read];
 
     try std.testing.expect(std.mem.indexOf(u8, resp_str, "500 Internal Server Error") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp_str, "Connection: close") != null);
 
     // Subsequent read should observe EOF because server closed the connection
-    const n2 = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+    var eof_buf: [64]u8 = undefined;
+    var eof_vec = [1][]u8{&eof_buf};
+    const n2 = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &eof_vec } })).net_read).data_len;
     try std.testing.expectEqual(@as(usize, 0), n2);
 
     server.shutdown();
@@ -1265,6 +1280,329 @@ test "review round 2: Finding 6 - duplicate chunked and forbidden chunk trailers
         const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
         // Handler encountered error when reading trailer, so returns 500 or drops
         try std.testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "500 Internal Server Error") != null or n == 0);
+    }
+
+    server.shutdown();
+    server_thread.join();
+}
+
+test "review round 3: Finding 2 - truncated body or handler error enforces Connection: close in headers" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    // 1. Handler claims Content-Length: 50, but only writes 10 bytes and finishes
+    try mux.handleFunc("GET /short_body", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            try w.header().set("Content-Length", "50");
+            try w.writeAll("0123456789");
+        }
+    }.handle);
+
+    // 2. Handler buffers data, then returns an error before headers flushed
+    try mux.handleFunc("GET /err_buffered", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            try w.header().set("Content-Length", "100");
+            try w.writeAll("partial");
+            return error.CustomHandlerFault;
+        }
+    }.handle);
+
+    const port: u16 = 19301;
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+
+    var server = http.Server.init(allocator, .{
+        .handler = mux.handler(),
+        .num_threads = 2,
+    });
+    server.listener = listener;
+    server.running.store(true, .release);
+    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: *std.Io.net.Server) void {
+            while (s.running.load(.acquire)) {
+                const stream = l.accept(s.io) catch break;
+                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
+                    stream.close(s.io);
+                };
+            }
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+
+    // Case 1: Truncated body must emit Connection: close, not keep-alive
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /short_body HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var resp_buf: [512]u8 = undefined;
+        var r_vec = [1][]u8{&resp_buf};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        const resp_str = resp_buf[0..n];
+
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "Connection: close") != null);
+        try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "connection: keep-alive") == null);
+    }
+
+    // Case 2: Handler error must clear Content-Length and emit Connection: close
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /err_buffered HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var resp_buf: [512]u8 = undefined;
+        var r_vec = [1][]u8{&resp_buf};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        const resp_str = resp_buf[0..n];
+
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "500 Internal Server Error") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "Connection: close") != null);
+        try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "connection: keep-alive") == null);
+    }
+
+    server.shutdown();
+    server_thread.join();
+}
+
+test "review round 3: Finding 3 - HTTP/1.0 request receives HTTP/1.0 status line and no chunked encoding" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("GET /version_test", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            try w.writeAll("hello-http10");
+        }
+    }.handle);
+
+    // Large response: in HTTP/1.1 would trigger chunked, but in HTTP/1.0 must NOT be chunked
+    try mux.handleFunc("GET /large_http10", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            var block: [8192]u8 = undefined;
+            @memset(&block, 'Z');
+            try w.writeAll(&block);
+        }
+    }.handle);
+
+    const port: u16 = 19302;
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+
+    var server = http.Server.init(allocator, .{
+        .handler = mux.handler(),
+        .num_threads = 2,
+    });
+    server.listener = listener;
+    server.running.store(true, .release);
+    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: *std.Io.net.Server) void {
+            while (s.running.load(.acquire)) {
+                const stream = l.accept(s.io) catch break;
+                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
+                    stream.close(s.io);
+                };
+            }
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+
+    // 1. Basic HTTP/1.0 request gets HTTP/1.0 status line
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /version_test HTTP/1.0\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var resp_buf: [512]u8 = undefined;
+        var r_vec = [1][]u8{&resp_buf};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        const resp_str = resp_buf[0..n];
+
+        try std.testing.expect(std.mem.startsWith(u8, resp_str, "HTTP/1.0 200 OK\r\n"));
+    }
+
+    // 2. Large HTTP/1.0 response must NOT use Transfer-Encoding: chunked
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /large_http10 HTTP/1.0\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var resp_buf: [1024]u8 = undefined;
+        var r_vec = [1][]u8{&resp_buf};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        const resp_str = resp_buf[0..n];
+
+        try std.testing.expect(std.mem.startsWith(u8, resp_str, "HTTP/1.0 200 OK\r\n"));
+        try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "transfer-encoding") == null);
+    }
+
+    server.shutdown();
+    server_thread.join();
+}
+
+test "review round 3: Finding 5 - Host case-insensitivity and IPv6 routing in live server" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("MYHOST.COM/info", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            try w.writeAll("myhost-info");
+        }
+    }.handle);
+
+    const port: u16 = 19303;
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+
+    var server = http.Server.init(allocator, .{
+        .handler = mux.handler(),
+        .num_threads = 2,
+    });
+    server.listener = listener;
+    server.running.store(true, .release);
+    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: *std.Io.net.Server) void {
+            while (s.running.load(.acquire)) {
+                const stream = l.accept(s.io) catch break;
+                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
+                    stream.close(s.io);
+                };
+            }
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+
+    // Client sends Host in lowercase with port
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /info HTTP/1.1\r\nHost: myhost.com:19303\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var resp_buf: [512]u8 = undefined;
+        var r_vec = [1][]u8{&resp_buf};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        const resp_str = resp_buf[0..n];
+
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "myhost-info") != null);
+    }
+
+    server.shutdown();
+    server_thread.join();
+}
+
+test "review round 3: Finding 6 - RFC 9112 request-target rejection in live server" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("OPTIONS *", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            try w.header().set("Allow", "GET, POST, OPTIONS");
+            w.writeHeader(.ok);
+        }
+    }.handle);
+
+    const port: u16 = 19304;
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+
+    var server = http.Server.init(allocator, .{
+        .handler = mux.handler(),
+        .num_threads = 2,
+    });
+    server.listener = listener;
+    server.running.store(true, .release);
+    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: *std.Io.net.Server) void {
+            while (s.running.load(.acquire)) {
+                const stream = l.accept(s.io) catch break;
+                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
+                    stream.close(s.io);
+                };
+            }
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+
+    // 1. GET * is rejected with 400 Bad Request
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET * HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var resp_buf: [512]u8 = undefined;
+        var r_vec = [1][]u8{&resp_buf};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        const resp_str = resp_buf[0..n];
+
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "400 Bad Request") != null);
+    }
+
+    // 2. OPTIONS * is accepted with 200 OK
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "OPTIONS * HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var resp_buf: [512]u8 = undefined;
+        var r_vec = [1][]u8{&resp_buf};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        const resp_str = resp_buf[0..n];
+
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp_str, "Allow: GET, POST, OPTIONS") != null);
     }
 
     server.shutdown();

@@ -138,6 +138,9 @@ pub fn firstSegment(path: []const u8) struct { seg: []const u8, rest: []const u8
     if (std.mem.eql(u8, path, "/")) {
         return .{ .seg = "/", .rest = "" };
     }
+    if (std.mem.eql(u8, path, "*")) {
+        return .{ .seg = "*", .rest = "" };
+    }
     var p = path;
     if (std.mem.startsWith(u8, p, "/")) {
         p = p[1..];
@@ -147,6 +150,29 @@ pub fn firstSegment(path: []const u8) struct { seg: []const u8, rest: []const u8
     } else {
         return .{ .seg = p, .rest = "" };
     }
+}
+
+pub fn stripHostPort(host: []const u8) []const u8 {
+    if (host.len > 0 and host[0] == '[') {
+        if (std.mem.indexOfScalar(u8, host, ']')) |closing| {
+            return host[0 .. closing + 1];
+        }
+    }
+    if (std.mem.lastIndexOfScalar(u8, host, ':')) |colon| {
+        return host[0..colon];
+    }
+    return host;
+}
+
+pub fn normalizeHostStack(host: []const u8, buf: *[256]u8) []const u8 {
+    const stripped = stripHostPort(host);
+    if (stripped.len <= buf.len) {
+        for (stripped, 0..) |c, i| {
+            buf[i] = std.ascii.toLower(c);
+        }
+        return buf[0..stripped.len];
+    }
+    return stripped;
 }
 
 pub fn parsePattern(allocator: std.mem.Allocator, raw: []const u8) !Pattern {
@@ -162,9 +188,28 @@ pub fn parsePattern(allocator: std.mem.Allocator, raw: []const u8) !Pattern {
         rest = std.mem.trimStart(u8, s[space_idx + 1 ..], " \t");
     }
 
+    if (std.mem.eql(u8, rest, "*")) {
+        var seg_list = std.ArrayListUnmanaged(Segment).empty;
+        try seg_list.append(allocator, .{ .s = "*", .wild = false, .multi = false });
+        return .{
+            .str = s,
+            .method = method,
+            .host = null,
+            .segments = try seg_list.toOwnedSlice(allocator),
+        };
+    }
+
     const slash_idx = std.mem.indexOfScalar(u8, rest, '/') orelse return error.MissingSlash;
     const host_part = rest[0..slash_idx];
-    const host: ?[]const u8 = if (host_part.len > 0) try allocator.dupe(u8, host_part) else null;
+    var host: ?[]const u8 = null;
+    if (host_part.len > 0) {
+        const stripped = stripHostPort(host_part);
+        const lower = try allocator.alloc(u8, stripped.len);
+        for (stripped, 0..) |c, i| {
+            lower[i] = std.ascii.toLower(c);
+        }
+        host = lower;
+    }
     var path_part = rest[slash_idx..];
 
     var seg_list = std.ArrayListUnmanaged(Segment).empty;
@@ -263,7 +308,8 @@ pub const ServeMux = struct {
     ) ?MatchResult {
         // 1. Host match
         if (host) |h| {
-            const h_name = if (std.mem.indexOfScalar(u8, h, ':')) |colon| h[0..colon] else h;
+            var h_buf: [256]u8 = undefined;
+            const h_name = normalizeHostStack(h, &h_buf);
             if (self.root.children.get(h_name)) |hn| {
                 if (matchMethodAndPath(hn, allocator, method, path, matches)) |res| {
                     return res;
@@ -334,7 +380,8 @@ pub const ServeMux = struct {
         out: *std.ArrayListUnmanaged([]const u8),
     ) !void {
         if (host) |h| {
-            const h_name = if (std.mem.indexOfScalar(u8, h, ':')) |colon| h[0..colon] else h;
+            var h_buf: [256]u8 = undefined;
+            const h_name = normalizeHostStack(h, &h_buf);
             if (self.root.children.get(h_name)) |hn| {
                 try collectFromHostNode(hn, allocator, path, out);
             }
@@ -523,4 +570,48 @@ test "ServeMux routing: method matching and wildcards" {
     defer matches5.deinit(allocator);
     const res5 = mux.matchTree(allocator, null, "GET", "/exact/extra", &matches5);
     try std.testing.expect(res5 == null);
+}
+
+test "ServeMux routing: Host case-insensitivity and IPv6 port stripping (Finding 5)" {
+    const allocator = std.testing.allocator;
+    var mux = ServeMux.init(allocator);
+    defer mux.deinit();
+
+    const dummy = struct {
+        fn handle(w: *ResponseWriter, req: *Request) anyerror!void {
+            _ = w;
+            _ = req;
+        }
+    }.handle;
+
+    try mux.handleFunc("EXAMPLE.COM/api", dummy);
+    try mux.handleFunc("[::1]/ipv6", dummy);
+
+    // 1. Matches lower-case Host header and Host with port
+    {
+        var matches = std.ArrayListUnmanaged([]const u8).empty;
+        defer matches.deinit(allocator);
+        const res = mux.matchTree(allocator, "example.com:8080", "GET", "/api", &matches);
+        try std.testing.expect(res != null);
+    }
+    {
+        var matches = std.ArrayListUnmanaged([]const u8).empty;
+        defer matches.deinit(allocator);
+        const res = mux.matchTree(allocator, "EXAMPLE.COM", "GET", "/api", &matches);
+        try std.testing.expect(res != null);
+    }
+
+    // 2. Matches IPv6 host with and without port
+    {
+        var matches = std.ArrayListUnmanaged([]const u8).empty;
+        defer matches.deinit(allocator);
+        const res = mux.matchTree(allocator, "[::1]:9090", "GET", "/ipv6", &matches);
+        try std.testing.expect(res != null);
+    }
+    {
+        var matches = std.ArrayListUnmanaged([]const u8).empty;
+        defer matches.deinit(allocator);
+        const res = mux.matchTree(allocator, "[::1]", "GET", "/ipv6", &matches);
+        try std.testing.expect(res != null);
+    }
 }
