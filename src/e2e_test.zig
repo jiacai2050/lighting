@@ -1411,9 +1411,14 @@ test "review round 3: Finding 2 - truncated body or handler error enforces Conne
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
 
         var resp_buf: [512]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
-        const resp_str = resp_buf[0..n];
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+        }
+        const resp_str = resp_buf[0..total_read];
 
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "Connection: close") != null);
@@ -1430,9 +1435,14 @@ test "review round 3: Finding 2 - truncated body or handler error enforces Conne
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
 
         var resp_buf: [512]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
-        const resp_str = resp_buf[0..n];
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+        }
+        const resp_str = resp_buf[0..total_read];
 
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "500 Internal Server Error") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "Connection: close") != null);
@@ -1506,9 +1516,14 @@ test "review round 3: Finding 3 - HTTP/1.0 request receives HTTP/1.0 status line
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
 
         var resp_buf: [512]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
-        const resp_str = resp_buf[0..n];
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+        }
+        const resp_str = resp_buf[0..total_read];
 
         try std.testing.expect(std.mem.startsWith(u8, resp_str, "HTTP/1.0 200 OK\r\n"));
     }
@@ -1590,9 +1605,14 @@ test "review round 3: Finding 5 - Host case-insensitivity and IPv6 routing in li
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
 
         var resp_buf: [512]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
-        const resp_str = resp_buf[0..n];
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+        }
+        const resp_str = resp_buf[0..total_read];
 
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "myhost-info") != null);
@@ -1657,9 +1677,14 @@ test "review round 3: Finding 6 - RFC 9112 request-target rejection in live serv
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
 
         var resp_buf: [512]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
-        const resp_str = resp_buf[0..n];
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+        }
+        const resp_str = resp_buf[0..total_read];
 
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "400 Bad Request") != null);
     }
@@ -1674,9 +1699,14 @@ test "review round 3: Finding 6 - RFC 9112 request-target rejection in live serv
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
 
         var resp_buf: [512]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
-        const resp_str = resp_buf[0..n];
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+        }
+        const resp_str = resp_buf[0..total_read];
 
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "Allow: GET, POST, OPTIONS") != null);
