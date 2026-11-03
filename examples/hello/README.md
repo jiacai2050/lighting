@@ -4,27 +4,18 @@ A minimal starter project demonstrating basic HTTP routing, dynamic path paramet
 
 ## Features
 
-- **Juicy Main**: Uses Zig 0.17's `pub fn main(init: std.process.Init) !void` entry point without manual allocator/IO boilerplate.
-- **Go 1.22+ Style Routing**: Exact matching (`GET /{$}`) and path wildcard parameters (`GET /hello/{name}`).
-- **Per-request Logging**: Built-in `http.LoggingHandler` printing method, path, HTTP status, and latency.
-- **Configurable Port**: Reads `PORT` from environment variables, defaulting to `7000`.
+- **Juicy Main**: `pub fn main(init: std.process.Init) !void` entry point.
+- **Routing**: Path parameters (`/hello/{name}`) and exact root (`/{$}`).
+- **Logging**: Per-request status and latency via `http.LoggingHandler`.
+- **Configurable**: Port via `PORT` env var (default: 7000).
 
 ## Quick Start
 
-### 1. Run inside this directory
-
 ```bash
-cd examples/hello
 zig build run
 ```
 
-### 2. Run from repository root
-
-```bash
-zig build run-hello
-```
-
-### 3. Run on custom port
+### Custom Port
 
 ```bash
 PORT=8080 zig build run

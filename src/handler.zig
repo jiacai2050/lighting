@@ -133,3 +133,21 @@ test "Handler fromFn and from struct" {
     const h3 = Handler.bind(&app, App.getHits);
     _ = h3;
 }
+
+test "inline for batch route binding" {
+    const App = struct {
+        fn h1(_: *@This(), _: *ResponseWriter, _: *Request) anyerror!void {}
+        fn h2(_: *@This(), _: *ResponseWriter, _: *Request) anyerror!void {}
+    };
+    var app = App{};
+    const routes = .{
+        .{ "GET /a", App.h1 },
+        .{ "GET /b", App.h2 },
+    };
+    inline for (routes) |r| {
+        const pattern, const method = r;
+        const h = Handler.bind(&app, method);
+        _ = pattern;
+        _ = h;
+    }
+}

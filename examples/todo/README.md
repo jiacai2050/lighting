@@ -4,31 +4,20 @@ A full-stack Todo application showcasing state injection, SQLite persistence, RE
 
 ## Features
 
-- **State Injection**: Uses `http.Handler.bind(&app, App.method)` to cleanly inject database connection and shared app state into each handler.
-- **SQLite Persistence**: Thread-safe SQLite persistence using [`zig-sqlite`](https://github.com/nDimensional/zig-sqlite) with automatic schema initialization and typed CRUD operations.
-- **Embedded SPA Frontend**: Modern dark-theme SPA (`index.html`) embedded directly into the binary via `@embedFile`, requiring zero external static file dependencies.
-- **RESTful API**: Clean JSON endpoints for creating, listing, toggling, and deleting tasks.
-- **Per-request Logging**: Integrated `http.LoggingHandler` middleware recording request method, path, status, and execution duration.
-- **Environment Configuration**: Configurable via `PORT` (default `7000`) and `DB_PATH` (default `/tmp/lighting-todo.db`).
+- **State Injection**: `http.Handler.bind(&app, App.method)` to inject database into handlers.
+- **SQLite**: Persistence via [`zig-sqlite`](https://github.com/nDimensional/zig-sqlite).
+- **Embedded SPA**: Dark-mode frontend embedded via `@embedFile("index.html")`.
+- **Configurable**: `PORT` (default: 7000) and `DB_PATH` (default: `/tmp/lighting-todo.db`).
 
 ## Quick Start
 
-### 1. Run inside this directory
-
 ```bash
-cd examples/todo
 zig build run
 ```
 
 Once running, visit [http://127.0.0.1:7000](http://127.0.0.1:7000) in your web browser.
 
-### 2. Run from repository root
-
-```bash
-zig build run-todo
-```
-
-### 3. Custom Port and Database Path
+### Custom Port and Database Path
 
 ```bash
 PORT=8000 DB_PATH=./data/todos.db zig build run

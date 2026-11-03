@@ -88,11 +88,18 @@ pub fn main(init: std.process.Init) !void {
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
 
-    try mux.handle("GET /{$}", http.Handler.bind(&app, App.handleIndex));
-    try mux.handle("GET /api/todos", http.Handler.bind(&app, App.handleList));
-    try mux.handle("POST /api/todos", http.Handler.bind(&app, App.handleCreate));
-    try mux.handle("POST /api/todos/{id}/toggle", http.Handler.bind(&app, App.handleToggle));
-    try mux.handle("DELETE /api/todos/{id}", http.Handler.bind(&app, App.handleDelete));
+    const routes = .{
+        .{ "GET /{$}", App.handleIndex },
+        .{ "GET /api/todos", App.handleList },
+        .{ "POST /api/todos", App.handleCreate },
+        .{ "POST /api/todos/{id}/toggle", App.handleToggle },
+        .{ "DELETE /api/todos/{id}", App.handleDelete },
+    };
+
+    inline for (routes) |r| {
+        const pattern, const handler = r;
+        try mux.handle(pattern, http.Handler.bind(&app, handler));
+    }
 
     var logging = http.LoggingHandler{ .next = mux.handler() };
 

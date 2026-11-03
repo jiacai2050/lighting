@@ -109,14 +109,8 @@ pub fn main(init: std.process.Init) !void {
 ## Examples
 
 * **[hello](examples/hello)**: Minimal starter demonstrating Juicy Main, Go 1.22+ routing with path parameters (`/hello/{name}`), request logging, and `PORT` configuration.
-  ```bash
-  zig build run-hello
-  ```
 
 * **[todo](examples/todo)**: Full-stack Todo app showcasing state injection (`http.Handler.bind`), [`zig-sqlite`](https://github.com/nDimensional/zig-sqlite) persistence, REST API, and an embedded dark-mode SPA frontend (`index.html`).
-  ```bash
-  zig build run-todo
-  ```
 
 ---
 
