@@ -1,0 +1,17 @@
+.{
+    .name = .example_hello,
+    .version = "0.0.0",
+    .fingerprint = 0x282ee0279dae895d,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .lighting = .{
+            .path = "../../",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "main.zig",
+        "README.md",
+    },
+}

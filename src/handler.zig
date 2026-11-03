@@ -46,6 +46,55 @@ pub const Handler = struct {
             .vtable = &Gen.vt,
         };
     }
+
+    /// Binds any pointer with a member method `fn (*T, *ResponseWriter, *Request) anyerror!void`
+    pub fn bind(pointer: anytype, comptime method: anytype) Handler {
+        const PtrType = @TypeOf(pointer);
+        const Pointee = std.meta.Child(PtrType);
+
+        const Gen = struct {
+            fn call(ctx: *anyopaque, w: *ResponseWriter, req: *Request) anyerror!void {
+                const self: *Pointee = @ptrCast(@alignCast(ctx));
+                return @call(.auto, method, .{ self, w, req });
+            }
+            const vt = VTable{ .serveHTTP = call };
+        };
+
+        return .{
+            .ptr = @ptrCast(pointer),
+            .vtable = &Gen.vt,
+        };
+    }
+};
+
+/// Standard request logging middleware that records method, path, HTTP status, and latency.
+pub const LoggingHandler = struct {
+    next: Handler,
+
+    pub fn serveHTTP(self: *LoggingHandler, w: *ResponseWriter, req: *Request) anyerror!void {
+        const start = std.Io.Clock.awake.now(w.io);
+        const method = req.method.asString();
+        const path = req.url.path;
+
+        const result = self.next.serveHTTP(w, req);
+
+        const duration = start.durationTo(std.Io.Clock.awake.now(w.io));
+        const us = duration.toMicroseconds();
+        const code = w.status_code.code();
+
+        if (us < 1000) {
+            std.log.info("{s} {s} {d} ({d}µs)", .{ method, path, code, us });
+        } else {
+            const ms = @as(f64, @floatFromInt(us)) / 1000.0;
+            std.log.info("{s} {s} {d} ({d:.2}ms)", .{ method, path, code, ms });
+        }
+
+        return result;
+    }
+
+    pub fn handler(self: *LoggingHandler) Handler {
+        return Handler.from(self);
+    }
 };
 
 /// Middleware function type: wraps a Handler and returns an augmented Handler
@@ -73,4 +122,14 @@ test "Handler fromFn and from struct" {
     var c = Counter{};
     const h2 = Handler.from(&c);
     _ = h2;
+
+    const App = struct {
+        hits: usize = 0,
+        fn getHits(self: *@This(), _: *ResponseWriter, _: *Request) anyerror!void {
+            self.hits += 1;
+        }
+    };
+    var app = App{};
+    const h3 = Handler.bind(&app, App.getHits);
+    _ = h3;
 }

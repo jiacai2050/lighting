@@ -267,7 +267,7 @@ test "parseRequestHead RFC compliance: Transfer-Encoding chunked validation" {
     try std.testing.expectEqual(true, head.is_chunked);
 }
 
-test "parseRequestHead RFC compliance: request-target forms validation (Finding 6)" {
+test "parseRequestHead RFC compliance: request-target forms validation" {
     const allocator = std.testing.allocator;
 
     // 1. origin-form is valid

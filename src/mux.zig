@@ -56,6 +56,9 @@ pub const RoutingNode = struct {
         h: Handler,
     ) !void {
         if (segs.len == 0) {
+            if (self.pattern != null) {
+                return error.PatternConflict;
+            }
             self.pattern = pat;
             self.handler = h;
             return;
@@ -64,6 +67,9 @@ pub const RoutingNode = struct {
         const seg = segs[0];
         if (seg.multi) {
             std.debug.assert(segs.len == 1);
+            if (self.multi_child != null and self.multi_child.?.pattern != null) {
+                return error.PatternConflict;
+            }
             if (self.multi_child == null) {
                 const node = try allocator.create(RoutingNode);
                 node.* = .{};
@@ -121,13 +127,14 @@ pub const RoutingNode = struct {
 
         // 3. Multi wildcard match (least specific)
         if (self.multi_child) |multi| {
-            const pat = multi.pattern.?;
-            const last_seg = pat.segments[pat.segments.len - 1];
-            if (last_seg.s.len > 0) {
-                const val = if (std.mem.startsWith(u8, path, "/")) path[1..] else path;
-                matches.append(allocator, val) catch return null;
+            if (multi.pattern) |pat| {
+                const last_seg = pat.segments[pat.segments.len - 1];
+                if (last_seg.s.len > 0) {
+                    const val = if (std.mem.startsWith(u8, path, "/")) path[1..] else path;
+                    matches.append(allocator, val) catch return null;
+                }
+                return multi;
             }
-            return multi;
         }
 
         return null;
@@ -195,6 +202,7 @@ pub fn normalizeHost(allocator: std.mem.Allocator, host: []const u8, stack_buf: 
             .allocated = dyn,
         };
     } else |_| {
+        std.log.warn("Failed to allocate buffer for normalized host ({d} bytes), using raw host", .{stripped.len});
         return .{
             .slice = stripped,
             .allocated = null,
@@ -614,7 +622,7 @@ test "ServeMux routing: method matching and wildcards" {
     try std.testing.expect(res5 == null);
 }
 
-test "ServeMux routing: Host case-insensitivity and IPv6 port stripping (Finding 5)" {
+test "ServeMux routing: Host case-insensitivity and IPv6 port stripping" {
     const allocator = std.testing.allocator;
     var mux = ServeMux.init(allocator);
     defer mux.deinit();

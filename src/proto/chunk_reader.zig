@@ -150,7 +150,16 @@ pub const BodyReader = struct {
             out_buf[len] = b;
             len += 1;
         }
-        if (len == out_buf.len and !cr_seen) return error.LineTooLong;
+        if (len == out_buf.len and !cr_seen) {
+            // Buffer is full. Check if CRLF immediately follows (valid line of exactly out_buf.len bytes)
+            const next_b = try self.readByte();
+            if (next_b == '\r') {
+                const next_lf = try self.readByte();
+                if (next_lf != '\n') return error.InvalidTrailerCRLF;
+            } else {
+                return error.LineTooLong;
+            }
+        }
 
         if (len == 0) return 0; // Terminal empty line
 
@@ -207,7 +216,16 @@ pub const BodyReader = struct {
             line_buf[len] = b;
             len += 1;
         }
-        if (len == line_buf.len and !cr_seen) return error.InvalidChunkSize;
+        if (len == line_buf.len and !cr_seen) {
+            // Buffer is full. Check if CRLF immediately follows (valid line of exactly line_buf.len bytes)
+            const next_b = try self.readByte();
+            if (next_b == '\r') {
+                const next_lf = try self.readByte();
+                if (next_lf != '\n') return error.InvalidChunkCRLF;
+            } else {
+                return error.InvalidChunkSize;
+            }
+        }
 
         var hex_str = std.mem.trim(u8, line_buf[0..len], " \t");
         if (hex_str.len == 0) return error.InvalidChunkSize;
@@ -237,7 +255,7 @@ pub const BodyReader = struct {
     }
 };
 
-test "BodyReader: rejects chunk size with bare LF (Finding 8)" {
+test "BodyReader: rejects chunk size with bare LF" {
     const io = std.Io.Threaded.global_single_threaded.io();
     const dummy_stream: std.Io.net.Stream = undefined;
 
@@ -262,7 +280,7 @@ test "BodyReader: parses valid chunked payload from initial buffer" {
     try std.testing.expectEqual(@as(usize, 0), eof);
 }
 
-test "BodyReader: returns UnexpectedEOF when content-length not satisfied (Finding 3)" {
+test "BodyReader: returns UnexpectedEOF when content-length not satisfied" {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
@@ -349,7 +367,7 @@ test "BodyReader: chunk trailer parsing and validation" {
         try std.testing.expectError(error.InvalidTrailerHeader, reader.read(&buf));
     }
 
-    // 6. Duplicate \r in trailer line is rejected (Finding 4)
+    // 6. Duplicate \r in trailer line is rejected
     {
         const raw = "5\r\nhello\r\n0\r\nX-Checksum: abc123\r\r\n\r\n";
         var reader = BodyReader.init(dummy_stream, io, raw, null, true);
@@ -358,7 +376,7 @@ test "BodyReader: chunk trailer parsing and validation" {
         try std.testing.expectError(error.InvalidTrailerCRLF, reader.read(&buf));
     }
 
-    // 7. Control character in trailer value is rejected (Finding 4)
+    // 7. Control character in trailer value is rejected
     {
         const raw = "5\r\nhello\r\n0\r\nX-Checksum: bad\x01value\r\n\r\n";
         var reader = BodyReader.init(dummy_stream, io, raw, null, true);
@@ -367,7 +385,7 @@ test "BodyReader: chunk trailer parsing and validation" {
         try std.testing.expectError(error.InvalidTrailerHeader, reader.read(&buf));
     }
 
-    // 8. Duplicate \r in chunk size line is rejected (Finding 4)
+    // 8. Duplicate \r in chunk size line is rejected
     {
         const raw = "5\r\r\nhello\r\n0\r\n\r\n";
         var reader = BodyReader.init(dummy_stream, io, raw, null, true);

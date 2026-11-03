@@ -198,7 +198,7 @@ test "ThreadPool execution" {
     try std.testing.expectEqual(@as(usize, 10), counter.load(.acquire));
 }
 
-test "ThreadPool: pending tasks in queue are properly canceled on destroy (Finding 1)" {
+test "ThreadPool: pending tasks in queue are properly canceled on destroy" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 

@@ -50,6 +50,32 @@ pub const ResponseWriter = struct {
         return true;
     }
 
+    /// Format RFC 9110 IMF-fixdate: "Sun, 06 Nov 1994 08:49:37 GMT" (29 bytes)
+    pub fn formatHttpDate(buf: *[29]u8, ts: i64) []const u8 {
+        const epoch_sec = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(0, ts)) };
+        const day_secs = epoch_sec.getDaySeconds();
+        const epoch_day = epoch_sec.getEpochDay();
+        const year_day = epoch_day.calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
+
+        // 1970-01-01 was Thursday (index 4 with 0=Sun)
+        const day_of_week = @mod(epoch_day.day + 4, 7);
+        const day_names = [7][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+        const month_names = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+        const dow = day_names[day_of_week];
+        const mon = month_names[month_day.month.numeric() - 1];
+        const day = month_day.day_index + 1;
+        const year = year_day.year;
+        const hour = day_secs.getHoursIntoDay();
+        const min = day_secs.getMinutesIntoHour();
+        const sec = day_secs.getSecondsIntoMinute();
+
+        return std.fmt.bufPrint(buf, "{s}, {:0>2} {s} {:0>4} {:0>2}:{:0>2}:{:0>2} GMT", .{
+            dow, day, mon, year, hour, min, sec,
+        }) catch unreachable;
+    }
+
     pub fn setWriteTimeout(self: *ResponseWriter, timeout_ns: ?u64) void {
         self.write_timeout_ns = timeout_ns;
     }
@@ -83,17 +109,29 @@ pub const ResponseWriter = struct {
             return data.len;
         }
 
-        // 3. Finding 10: Check against explicit user-specified Content-Length
+        // Check against explicit user-specified Content-Length
         if (self.headers.get("content-length")) |cl_str| {
-            if (std.fmt.parseInt(u64, cl_str, 10)) |cl| {
-                if (self.bytes_written + self.buffer_len + data.len > cl) {
-                    return error.ContentLengthExceeded;
-                }
-            } else |_| {}
+            const cl = std.fmt.parseInt(u64, cl_str, 10) catch {
+                return error.InvalidContentLength;
+            };
+            if (self.bytes_written + self.buffer_len + data.len > cl) {
+                return error.ContentLengthExceeded;
+            }
         }
 
-        // If headers not yet written and data fits in buffer: buffer it!
-        if (!self.header_written and (self.buffer_len + data.len <= self.buffer.len)) {
+        // Check if user requested Transfer-Encoding: chunked
+        if (self.headers.get("transfer-encoding")) |te| {
+            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, te, " \t"), "chunked")) {
+                if (self.version == .@"HTTP/1.1") {
+                    self.chunked_mode = true;
+                }
+            } else {
+                return error.UnsupportedTransferEncoding;
+            }
+        }
+
+        // If headers not yet written and data fits in buffer: buffer it! (unless chunked_mode explicitly forced)
+        if (!self.chunked_mode and !self.header_written and (self.buffer_len + data.len <= self.buffer.len)) {
             @memcpy(self.buffer[self.buffer_len .. self.buffer_len + data.len], data);
             self.buffer_len += data.len;
             return data.len;
@@ -157,9 +195,17 @@ pub const ResponseWriter = struct {
 
     fn flushHeaders(self: *ResponseWriter) !void {
         if (self.header_written) return;
-        self.header_written = true;
 
-        // Ensure Date header or Connection header
+        // RFC 9110 Section 6.6.1: Date header MUST be sent by origin server
+        if (self.headers.get("date") == null) {
+            var date_buf: [29]u8 = undefined;
+            const now_ts = std.Io.Clock.real.now(self.io).toSeconds();
+            const date_str = formatHttpDate(&date_buf, now_ts);
+            const date_dup = try self.arena.dupe(u8, date_str);
+            try self.headers.set("Date", date_dup);
+        }
+
+        // Ensure Connection header
         if (!self.keep_alive and self.headers.get("connection") == null) {
             try self.headers.set("Connection", "close");
         } else if (self.keep_alive and self.headers.get("connection") == null) {
@@ -171,24 +217,38 @@ pub const ResponseWriter = struct {
             self.buffer_len = 0;
         }
 
-        // RFC 9110 Section 8.6 & 6.4.1:
+        // Validate user-specified Content-Length
+        if (self.headers.get("content-length")) |cl_str| {
+            _ = std.fmt.parseInt(u64, cl_str, 10) catch {
+                return error.InvalidContentLength;
+            };
+        }
+
+        // RFC 9110 Section 8.6 & 6.4.1 & RFC 9112 Section 6.1:
         // 1xx, 204, 304 must NOT include Content-Length or Transfer-Encoding (strip even if user set them)
         // 205 MUST NOT include a body; Content-Length if present must be 0, no chunked
         const code = self.status_code.code();
         if ((code >= 100 and code < 200) or code == 204 or code == 304) {
             self.headers.delete("Content-Length");
             self.headers.delete("Transfer-Encoding");
+            self.chunked_mode = false;
         } else if (code == 205) {
             self.headers.delete("Transfer-Encoding");
+            self.chunked_mode = false;
             if (self.headers.get("content-length") != null) {
                 try self.headers.set("Content-Length", "0");
             }
-        }
-
-        // RFC 9112 Section 6.1: HTTP/1.0 does not support chunked
-        if (self.version == .@"HTTP/1.0") {
+        } else if (self.version == .@"HTTP/1.0") {
+            // RFC 9112 Section 6.1: HTTP/1.0 does not support chunked
             self.headers.delete("Transfer-Encoding");
             self.chunked_mode = false;
+        } else if (self.chunked_mode) {
+            self.headers.delete("Content-Length");
+            self.headers.delete("Transfer-Encoding");
+            try self.headers.set("Transfer-Encoding", "chunked");
+        } else {
+            // Non-chunked mode must never send Transfer-Encoding
+            self.headers.delete("Transfer-Encoding");
         }
 
         // Format Status Line: e.g. "HTTP/1.1 200 OK\r\n" or "HTTP/1.0 200 OK\r\n"
@@ -218,13 +278,14 @@ pub const ResponseWriter = struct {
             stack_vecs[vec_count] = "\r\n";
             vec_count += 1;
 
-            if (self.buffer_len > 0) {
+            if (!self.chunked_mode and self.buffer_len > 0) {
                 stack_vecs[vec_count] = self.buffer[0..self.buffer_len];
                 vec_count += 1;
                 self.bytes_written += self.buffer_len;
                 self.buffer_len = 0;
             }
 
+            self.header_written = true;
             try io_util.writeSocketAllTimeout(self.stream, self.io, stack_vecs[0..vec_count], self.write_timeout_ns);
         } else {
             // Fallback for unusually large header lists
@@ -240,12 +301,13 @@ pub const ResponseWriter = struct {
             }
             try vecs.append(self.arena, "\r\n");
 
-            if (self.buffer_len > 0) {
+            if (!self.chunked_mode and self.buffer_len > 0) {
                 try vecs.append(self.arena, self.buffer[0..self.buffer_len]);
                 self.bytes_written += self.buffer_len;
                 self.buffer_len = 0;
             }
 
+            self.header_written = true;
             try io_util.writeSocketAllTimeout(self.stream, self.io, vecs.items, self.write_timeout_ns);
         }
     }
@@ -258,18 +320,26 @@ pub const ResponseWriter = struct {
         // MUST check before flushHeaders() so we don't advertise Connection: keep-alive
         if (body_allowed and !self.is_head and !self.chunked_mode) {
             if (self.headers.get("content-length")) |cl_str| {
-                if (std.fmt.parseInt(u64, cl_str, 10)) |cl| {
-                    if (self.bytes_written + self.buffer_len < cl) {
-                        // Body truncated by handler; force Connection: close
-                        self.keep_alive = false;
-                        self.headers.delete("Connection");
-                        try self.headers.set("Connection", "close");
-                    }
-                } else |_| {}
+                const cl = std.fmt.parseInt(u64, cl_str, 10) catch {
+                    return error.InvalidContentLength;
+                };
+                if (self.bytes_written + self.buffer_len < cl) {
+                    // Body truncated by handler; force Connection: close
+                    self.keep_alive = false;
+                    self.headers.delete("Connection");
+                    try self.headers.set("Connection", "close");
+                }
             }
         }
 
         if (!self.header_written) {
+            // Activate chunked_mode if user requested it
+            if (self.headers.get("transfer-encoding")) |te| {
+                if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, te, " \t"), "chunked") and self.version == .@"HTTP/1.1") {
+                    self.chunked_mode = true;
+                }
+            }
+
             // Response fit completely inside buffer or is HEAD / 204
             if (!body_allowed) {
                 self.buffer_len = 0;
@@ -285,7 +355,7 @@ pub const ResponseWriter = struct {
                 }
                 self.buffer_len = 0;
             } else {
-                if (self.headers.get("content-length") == null) {
+                if (!self.chunked_mode and self.headers.get("content-length") == null) {
                     var len_buf: [32]u8 = undefined;
                     const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{self.buffer_len}) catch unreachable;
                     const len_dup = try self.arena.dupe(u8, len_str);
@@ -293,42 +363,43 @@ pub const ResponseWriter = struct {
                 }
             }
             try self.flushHeaders();
-        } else {
-            // Headers were already flushed
-            if (!body_allowed or self.is_head) {
-                self.buffer_len = 0;
-                return;
-            }
+        }
 
-            if (self.chunked_mode) {
-                // If there is residual data in buffer
-                if (self.buffer_len > 0) {
-                    try self.writeChunk(self.buffer[0..self.buffer_len]);
-                    self.bytes_written += self.buffer_len;
-                    self.buffer_len = 0;
-                }
-                // Send terminal 0\r\n\r\n chunk
-                var final_vec = [1][]const u8{"0\r\n\r\n"};
-                try io_util.writeSocketAllTimeout(self.stream, self.io, &final_vec, self.write_timeout_ns);
-            } else {
-                if (self.buffer_len > 0) {
-                    var vec = [1][]const u8{self.buffer[0..self.buffer_len]};
-                    try io_util.writeSocketAllTimeout(self.stream, self.io, &vec, self.write_timeout_ns);
-                    self.bytes_written += self.buffer_len;
-                    self.buffer_len = 0;
-                }
+        // Headers are now guaranteed to be flushed.
+        if (!body_allowed or self.is_head) {
+            self.buffer_len = 0;
+            return;
+        }
+
+        if (self.chunked_mode) {
+            // If there is residual data in buffer
+            if (self.buffer_len > 0) {
+                try self.writeChunk(self.buffer[0..self.buffer_len]);
+                self.bytes_written += self.buffer_len;
+                self.buffer_len = 0;
+            }
+            // Send terminal 0\r\n\r\n chunk
+            var final_vec = [1][]const u8{"0\r\n\r\n"};
+            try io_util.writeSocketAllTimeout(self.stream, self.io, &final_vec, self.write_timeout_ns);
+        } else {
+            if (self.buffer_len > 0) {
+                var vec = [1][]const u8{self.buffer[0..self.buffer_len]};
+                try io_util.writeSocketAllTimeout(self.stream, self.io, &vec, self.write_timeout_ns);
+                self.bytes_written += self.buffer_len;
+                self.buffer_len = 0;
             }
         }
 
-        // Finding 10: Check if actual written was less than user-specified Content-Length
+        // Check if actual written was less than user-specified Content-Length
         if (body_allowed and !self.is_head and !self.chunked_mode) {
             if (self.headers.get("content-length")) |cl_str| {
-                if (std.fmt.parseInt(u64, cl_str, 10)) |cl| {
-                    if (self.bytes_written < cl) {
-                        // Body truncated by handler; close connection to prevent desynchronization
-                        self.keep_alive = false;
-                    }
-                } else |_| {}
+                const cl = std.fmt.parseInt(u64, cl_str, 10) catch {
+                    return error.InvalidContentLength;
+                };
+                if (self.bytes_written < cl) {
+                    // Body truncated by handler; close connection to prevent desynchronization
+                    self.keep_alive = false;
+                }
             }
         }
     }
@@ -358,3 +429,23 @@ pub const ResponseWriter = struct {
         }
     };
 };
+
+test "formatHttpDate compliance with RFC 9110 IMF-fixdate format" {
+    var buf: [29]u8 = undefined;
+
+    // 1. Epoch zero: 1970-01-01 00:00:00 GMT (Thursday)
+    const epoch_zero = ResponseWriter.formatHttpDate(&buf, 0);
+    try std.testing.expectEqualStrings("Thu, 01 Jan 1970 00:00:00 GMT", epoch_zero);
+
+    // 2. RFC 9110 Section 5.6.7 canonical example: Sun, 06 Nov 1994 08:49:37 GMT
+    const rfc_example = ResponseWriter.formatHttpDate(&buf, 784111777);
+    try std.testing.expectEqualStrings("Sun, 06 Nov 1994 08:49:37 GMT", rfc_example);
+
+    // 3. Leap year: 2000-02-29 23:59:59 GMT (Tuesday)
+    const leap_year = ResponseWriter.formatHttpDate(&buf, 951868799);
+    try std.testing.expectEqualStrings("Tue, 29 Feb 2000 23:59:59 GMT", leap_year);
+
+    // 4. Leap day rollover: 2000-03-01 00:00:00 GMT (Wednesday)
+    const leap_next = ResponseWriter.formatHttpDate(&buf, 951868800);
+    try std.testing.expectEqualStrings("Wed, 01 Mar 2000 00:00:00 GMT", leap_next);
+}

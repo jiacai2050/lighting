@@ -28,7 +28,7 @@ test "e2e: GET, POST echo, and Keep-Alive" {
     var listener = try addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -126,7 +126,7 @@ test "e2e: chunked transfer encoding" {
     var listener = try addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -183,7 +183,7 @@ test "e2e: 431 header too large and 500 internal server error" {
     var listener = try addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
         .max_header_bytes = 256, // small limit to easily test 431
@@ -216,9 +216,15 @@ test "e2e: 431 header too large and 500 internal server error" {
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client_stream.socket.handle, .data = &vec } })).net_write;
 
         var resp_buf: [1024]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
-        const resp_str = resp_buf[0..n];
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+            if (std.ascii.findIgnoreCase(resp_buf[0..total_read], "500 Internal Server Error") != null) break;
+        }
+        const resp_str = resp_buf[0..total_read];
 
         try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "500 Internal Server Error") != null);
     }
@@ -236,9 +242,15 @@ test "e2e: 431 header too large and 500 internal server error" {
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client_stream.socket.handle, .data = &vecs } })).net_write;
 
         var resp_buf: [1024]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
-        const resp_str = resp_buf[0..n];
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+            if (std.ascii.findIgnoreCase(resp_buf[0..total_read], "431 Request Header Fields Too Large") != null) break;
+        }
+        const resp_str = resp_buf[0..total_read];
 
         try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "431 Request Header Fields Too Large") != null);
     }
@@ -284,7 +296,7 @@ test "e2e: Go 1.22+ pattern routing with wildcards and 405 Method Not Allowed" {
     var listener = try addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -397,7 +409,7 @@ test "e2e: Server header and idle timeout handling" {
     var listener = try addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
         .read_header_timeout_ns = 50 * std.time.ns_per_ms, // 50ms header timeout
@@ -435,9 +447,15 @@ test "e2e: Server header and idle timeout handling" {
         try std.Io.sleep(io, .{ .nanoseconds = 100 * std.time.ns_per_ms }, .boot);
 
         var resp_buf: [1024]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
-        const resp_str = resp_buf[0..n];
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+            if (std.mem.indexOf(u8, resp_buf[0..total_read], "408 Request Timeout") != null) break;
+        }
+        const resp_str = resp_buf[0..total_read];
 
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "408 Request Timeout") != null);
     }
@@ -500,7 +518,7 @@ test "e2e: HTTP pipelining and RFC compliance (400 on missing Host, 204 No Conte
     var listener = try addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -614,9 +632,15 @@ test "e2e: HTTP pipelining and RFC compliance (400 on missing Host, 204 No Conte
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client_stream.socket.handle, .data = &dummy_vec } })).net_write;
 
         var resp_buf: [1024]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
-        const resp_str = resp_buf[0..n];
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+            if (std.mem.indexOf(u8, resp_buf[0..total_read], "204 No Content") != null) break;
+        }
+        const resp_str = resp_buf[0..total_read];
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "204 No Content") != null);
     }
 
@@ -624,7 +648,7 @@ test "e2e: HTTP pipelining and RFC compliance (400 on missing Host, 204 No Conte
     server_thread.join();
 }
 
-test "review: Finding 2 & 9 - RFC 9112 strict request line, headers, and Transfer-Encoding" {
+test "e2e: RFC 9112 strict request line, headers, and Transfer-Encoding" {
     const allocator = std.testing.allocator;
 
     // 1. Request line with 4 tokens rejected
@@ -645,7 +669,7 @@ test "review: Finding 2 & 9 - RFC 9112 strict request line, headers, and Transfe
         try std.testing.expectError(error.DuplicateHostHeader, http.parseRequestHead(allocator, raw));
     }
 
-    // 4. Transfer-Encoding not-chunked rejected (Finding 2)
+    // 4. Transfer-Encoding not-chunked rejected
     {
         const raw = "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: not-chunked\r\n\r\n";
         try std.testing.expectError(error.UnsupportedTransferEncoding, http.parseRequestHead(allocator, raw));
@@ -667,7 +691,7 @@ test "review: Finding 2 & 9 - RFC 9112 strict request line, headers, and Transfe
     }
 }
 
-test "review: Finding 6 - Response header CRLF and control character injection" {
+test "e2e: response header CRLF and control character injection" {
     var headers = http.HeaderMap.init(std.testing.allocator);
     defer headers.deinit();
 
@@ -685,7 +709,7 @@ test "review: Finding 6 - Response header CRLF and control character injection" 
     try std.testing.expectEqualStrings("standard value 123 !", headers.get("X-Good-Header").?);
 }
 
-test "review: Finding 7 - ThreadPool QueueFull backpressure and error recovery" {
+test "e2e: ThreadPool QueueFull backpressure and error recovery" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -715,7 +739,7 @@ test "review: Finding 7 - ThreadPool QueueFull backpressure and error recovery" 
     try std.testing.expect(!pool.hasPendingTasks());
 }
 
-test "review: Finding 4, 5, 10 - HEAD suppression, 204 suppression, Content-Length guards" {
+test "e2e: HEAD suppression, 204 suppression, Content-Length guards" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -756,7 +780,7 @@ test "review: Finding 4, 5, 10 - HEAD suppression, 204 suppression, Content-Leng
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -859,7 +883,7 @@ test "review: Finding 4, 5, 10 - HEAD suppression, 204 suppression, Content-Leng
     server_thread.join();
 }
 
-test "review round 2: Finding 1 - shutdown interrupts idle keep-alive connections without hanging" {
+test "e2e: shutdown interrupts idle keep-alive connections without hanging" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -876,7 +900,7 @@ test "review round 2: Finding 1 - shutdown interrupts idle keep-alive connection
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -911,9 +935,15 @@ test "review round 2: Finding 1 - shutdown interrupts idle keep-alive connection
     _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client_stream.socket.handle, .data = &vec } })).net_write;
 
     var resp_buf: [256]u8 = undefined;
-    var r_vec = [1][]u8{&resp_buf};
-    const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
-    try std.testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "200 OK") != null);
+    var total_read: usize = 0;
+    while (total_read < resp_buf.len) {
+        var r_vec = [1][]u8{resp_buf[total_read..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client_stream.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        total_read += n;
+        if (std.mem.indexOf(u8, resp_buf[0..total_read], "200 OK") != null) break;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, resp_buf[0..total_read], "200 OK") != null);
 
     // Client stays idle on connection. Server now shuts down.
     // shutdown() and deinit() MUST unblock the worker and return immediately (not hang indefinitely in join).
@@ -921,7 +951,7 @@ test "review round 2: Finding 1 - shutdown interrupts idle keep-alive connection
     server_thread.join();
 }
 
-test "review round 2: Finding 2 - worker pool yields idle keep-alive connection when queue has pending tasks" {
+test "e2e: worker pool yields idle keep-alive connection when queue has pending tasks" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -939,7 +969,7 @@ test "review round 2: Finding 2 - worker pool yields idle keep-alive connection 
     const port = listener.socket.address.getPort();
 
     // Server with only 1 worker thread!
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 1,
         .idle_timeout_ns = 5 * std.time.ns_per_s, // long idle timeout: 5s
@@ -976,9 +1006,15 @@ test "review round 2: Finding 2 - worker pool yields idle keep-alive connection 
     _ = try (try io.operate(.{ .net_write = .{ .socket_handle = c1.socket.handle, .data = &vec1 } })).net_write;
 
     var resp_buf: [256]u8 = undefined;
-    var r_vec = [1][]u8{&resp_buf};
-    const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = c1.socket.handle, .data = &r_vec } })).net_read).data_len;
-    try std.testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "200 OK") != null);
+    var total_read: usize = 0;
+    while (total_read < resp_buf.len) {
+        var r_vec = [1][]u8{resp_buf[total_read..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = c1.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        total_read += n;
+        if (std.mem.indexOf(u8, resp_buf[0..total_read], "200 OK") != null) break;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, resp_buf[0..total_read], "200 OK") != null);
 
     // Client 1 remains idle without sending anything more.
     // Now Client 2 connects and sends a request. Client 2's task is queued because worker 1 is busy waiting for C1.
@@ -1006,7 +1042,7 @@ test "review round 2: Finding 2 - worker pool yields idle keep-alive connection 
     server_thread.join();
 }
 
-test "review round 2: Finding 3 - handler error forces Connection: close and prevents connection reuse" {
+test "e2e: handler error forces Connection: close and prevents connection reuse" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -1023,7 +1059,7 @@ test "review round 2: Finding 3 - handler error forces Connection: close and pre
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -1081,7 +1117,7 @@ test "review round 2: Finding 3 - handler error forces Connection: close and pre
     server_thread.join();
 }
 
-test "review round 2: Finding 4 - status 205 and header stripping on bodyless responses" {
+test "e2e: status 205 and header stripping on bodyless responses" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -1111,7 +1147,7 @@ test "review round 2: Finding 4 - status 205 and header stripping on bodyless re
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -1194,7 +1230,7 @@ test "review round 2: Finding 4 - status 205 and header stripping on bodyless re
     server_thread.join();
 }
 
-test "review round 2: Finding 5 - monotonic read deadline stops Slow Post trickle" {
+test "e2e: monotonic read deadline stops Slow Post trickle" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -1213,7 +1249,7 @@ test "review round 2: Finding 5 - monotonic read deadline stops Slow Post trickl
     const port = listener.socket.address.getPort();
 
     // read_timeout_ns = 150ms
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
         .read_timeout_ns = 150 * std.time.ns_per_ms,
@@ -1266,7 +1302,7 @@ test "review round 2: Finding 5 - monotonic read deadline stops Slow Post trickl
     server_thread.join();
 }
 
-test "review round 2: Finding 6 - duplicate chunked and forbidden chunk trailers rejected" {
+test "e2e: duplicate chunked and forbidden chunk trailers rejected" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -1284,7 +1320,7 @@ test "review round 2: Finding 6 - duplicate chunked and forbidden chunk trailers
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -1321,9 +1357,15 @@ test "review round 2: Finding 6 - duplicate chunked and forbidden chunk trailers
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
 
         var resp_buf: [256]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
-        try std.testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "400 Bad Request") != null);
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+            if (std.mem.indexOf(u8, resp_buf[0..total_read], "400 Bad Request") != null) break;
+        }
+        try std.testing.expect(std.mem.indexOf(u8, resp_buf[0..total_read], "400 Bad Request") != null);
     }
 
     // 2. Forbidden trailer Content-Length rejected
@@ -1336,17 +1378,23 @@ test "review round 2: Finding 6 - duplicate chunked and forbidden chunk trailers
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
 
         var resp_buf: [256]u8 = undefined;
-        var r_vec = [1][]u8{&resp_buf};
-        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        var total_read: usize = 0;
+        while (total_read < resp_buf.len) {
+            var r_vec = [1][]u8{resp_buf[total_read..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total_read += n;
+            if (std.mem.indexOf(u8, resp_buf[0..total_read], "500 Internal Server Error") != null) break;
+        }
         // Handler encountered error when reading trailer, so returns 500 or drops
-        try std.testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "500 Internal Server Error") != null or n == 0);
+        try std.testing.expect(std.mem.indexOf(u8, resp_buf[0..total_read], "500 Internal Server Error") != null or total_read == 0);
     }
 
     server.shutdown();
     server_thread.join();
 }
 
-test "review round 3: Finding 2 - truncated body or handler error enforces Connection: close in headers" {
+test "e2e: truncated body or handler error enforces Connection: close in headers" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -1374,7 +1422,7 @@ test "review round 3: Finding 2 - truncated body or handler error enforces Conne
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -1453,7 +1501,7 @@ test "review round 3: Finding 2 - truncated body or handler error enforces Conne
     server_thread.join();
 }
 
-test "review round 3: Finding 3 - HTTP/1.0 request receives HTTP/1.0 status line and no chunked encoding" {
+test "e2e: HTTP/1.0 request receives HTTP/1.0 status line and no chunked encoding" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -1479,7 +1527,7 @@ test "review round 3: Finding 3 - HTTP/1.0 request receives HTTP/1.0 status line
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -1550,7 +1598,7 @@ test "review round 3: Finding 3 - HTTP/1.0 request receives HTTP/1.0 status line
     server_thread.join();
 }
 
-test "review round 3: Finding 5 - Host case-insensitivity and IPv6 routing in live server" {
+test "e2e: Host case-insensitivity and IPv6 routing in live server" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -1567,7 +1615,7 @@ test "review round 3: Finding 5 - Host case-insensitivity and IPv6 routing in li
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -1622,7 +1670,7 @@ test "review round 3: Finding 5 - Host case-insensitivity and IPv6 routing in li
     server_thread.join();
 }
 
-test "review round 3: Finding 6 - RFC 9112 request-target rejection in live server" {
+test "e2e: RFC 9112 request-target rejection in live server" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -1640,7 +1688,7 @@ test "review round 3: Finding 6 - RFC 9112 request-target rejection in live serv
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -1716,7 +1764,7 @@ test "review round 3: Finding 6 - RFC 9112 request-target rejection in live serv
     server_thread.join();
 }
 
-test "e2e: absolute-form request targets and routing (Finding 3)" {
+test "e2e: absolute-form request targets and routing" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -1748,7 +1796,7 @@ test "e2e: absolute-form request targets and routing (Finding 3)" {
     var listener = try listen_addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 2,
     });
@@ -1843,6 +1891,539 @@ test "e2e: absolute-form request targets and routing (Finding 3)" {
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "root-ok") != null);
     }
+
+    server.shutdown();
+    server_thread.join();
+}
+
+test "e2e: invalid Content-Length is rejected" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("GET /bad-cl", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            try w.headers.set("Content-Length", "not_a_number");
+            try w.writeAll("hello");
+        }
+    }.handle);
+
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var server = http.Server.init(allocator, io, .{
+        .handler = mux.handler(),
+        .num_threads = 1,
+    });
+    server.listener = listener;
+    server.running.store(true, .release);
+    server.pool = try http.ThreadPool.create(allocator, io, 1, 1024);
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: *std.Io.net.Server) void {
+            while (s.running.load(.acquire)) {
+                const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
+                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
+                    stream.close(s.io);
+                };
+            }
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    const req = "GET /bad-cl HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    var vec = [1][]const u8{req};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+    var resp_buf: [512]u8 = undefined;
+    var total: usize = 0;
+    while (total < resp_buf.len) {
+        var r_vec = [1][]u8{resp_buf[total..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        total += n;
+    }
+    const resp_str = resp_buf[0..total];
+    // Invalid Content-Length must trigger 500 Internal Server Error, and must NOT send not_a_number header
+    try std.testing.expect(std.mem.indexOf(u8, resp_str, "500 Internal Server Error") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp_str, "not_a_number") == null);
+
+    server.shutdown();
+    server_thread.join();
+}
+
+test "e2e: Transfer-Encoding chunked synchronization" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("GET /manual-te", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            try w.headers.set("Transfer-Encoding", "chunked");
+            try w.writeAll("chunk-body");
+        }
+    }.handle);
+
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var server = http.Server.init(allocator, io, .{
+        .handler = mux.handler(),
+        .num_threads = 1,
+    });
+    server.listener = listener;
+    server.running.store(true, .release);
+    server.pool = try http.ThreadPool.create(allocator, io, 1, 1024);
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: *std.Io.net.Server) void {
+            while (s.running.load(.acquire)) {
+                const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
+                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
+                    stream.close(s.io);
+                };
+            }
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    const req = "GET /manual-te HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    var vec = [1][]const u8{req};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+    var resp_buf: [512]u8 = undefined;
+    var total: usize = 0;
+    while (total < resp_buf.len) {
+        var r_vec = [1][]u8{resp_buf[total..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        total += n;
+    }
+    const resp_str = resp_buf[0..total];
+    try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
+    // Must be properly chunked and must NOT have Content-Length header
+    try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "Transfer-Encoding: chunked") != null);
+    try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "Content-Length:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, resp_str, "0\r\n\r\n") != null);
+
+    server.shutdown();
+    server_thread.join();
+}
+
+test "e2e: body of exactly 256KB is cleanly drained and retains keep-alive" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("POST /drain256", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            // Handler ignores body completely, leaving server to drain
+            try w.writeAll("drained-ok");
+        }
+    }.handle);
+
+    try mux.handleFunc("GET /second", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            try w.writeAll("second-ok");
+        }
+    }.handle);
+
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var server = http.Server.init(allocator, io, .{
+        .handler = mux.handler(),
+        .num_threads = 1,
+    });
+    server.listener = listener;
+    server.running.store(true, .release);
+    server.pool = try http.ThreadPool.create(allocator, io, 1, 1024);
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: *std.Io.net.Server) void {
+            while (s.running.load(.acquire)) {
+                const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
+                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
+                    stream.close(s.io);
+                };
+            }
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    // Request 1: POST with exactly 256KB (262144 bytes) body
+    const body_len = 256 * 1024;
+    const body_buf = try allocator.alloc(u8, body_len);
+    defer allocator.free(body_buf);
+    @memset(body_buf, 'X');
+
+    var head_buf: [128]u8 = undefined;
+    const head_str = std.fmt.bufPrint(&head_buf, "POST /drain256 HTTP/1.1\r\nHost: localhost\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n", .{body_len}) catch unreachable;
+    var head_vec = [1][]const u8{head_str};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &head_vec } })).net_write;
+
+    var body_vec = [1][]const u8{body_buf};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &body_vec } })).net_write;
+
+    var resp_buf: [512]u8 = undefined;
+    var total1: usize = 0;
+    while (total1 < resp_buf.len) {
+        var r_vec = [1][]u8{resp_buf[total1..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        total1 += n;
+        if (std.mem.indexOf(u8, resp_buf[0..total1], "drained-ok") != null) break;
+    }
+    const resp_str = resp_buf[0..total1];
+    try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp_str, "drained-ok") != null);
+
+    // Request 2: Must succeed on the same Keep-Alive connection
+    const req2 = "GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    var vec2 = [1][]const u8{req2};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec2 } })).net_write;
+
+    var resp2_buf: [512]u8 = undefined;
+    var total2: usize = 0;
+    while (total2 < resp2_buf.len) {
+        var r2_vec = [1][]u8{resp2_buf[total2..]};
+        const n2 = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r2_vec } })).net_read).data_len;
+        if (n2 == 0) break;
+        total2 += n2;
+    }
+    const resp2_str = resp2_buf[0..total2];
+    try std.testing.expect(std.mem.indexOf(u8, resp2_str, "200 OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp2_str, "second-ok") != null);
+
+    server.shutdown();
+    server_thread.join();
+}
+
+test "e2e: chunk reader line boundary exact capacity acceptance" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Construct raw chunked stream with a trailer line of exactly 1024 bytes (e.g. "X-Custom: " + 994 bytes of 'a' + "\r\n")
+    // Total trailer line without CRLF = 10 + 1014 = 1024 bytes!
+    const prefix = "5\r\nhello\r\n0\r\n";
+    const key = "X-Trailer: ";
+    const val_len = 1024 - key.len;
+    var raw_buf: [2048]u8 = undefined;
+    var pos: usize = 0;
+    @memcpy(raw_buf[pos .. pos + prefix.len], prefix);
+    pos += prefix.len;
+    @memcpy(raw_buf[pos .. pos + key.len], key);
+    pos += key.len;
+    @memset(raw_buf[pos .. pos + val_len], 'a');
+    pos += val_len;
+    @memcpy(raw_buf[pos .. pos + 4], "\r\n\r\n");
+    pos += 4;
+
+    const payload = raw_buf[0..pos];
+    const dummy_stream: std.Io.net.Stream = undefined;
+    var reader = http.BodyReader.init(dummy_stream, io, payload, null, true);
+
+    const body = try reader.readAllAlloc(allocator, 1024);
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("hello", body);
+}
+
+test "e2e: ServeMux route registration conflict returns error.PatternConflict" {
+    const allocator = std.testing.allocator;
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    const dummy_fn = struct {
+        fn handle(_: *http.ResponseWriter, _: *http.Request) anyerror!void {}
+    }.handle;
+
+    // 1. Literal duplicate conflict
+    try mux.handleFunc("GET /items", dummy_fn);
+    try std.testing.expectError(error.PatternConflict, mux.handleFunc("GET /items", dummy_fn));
+
+    // 2. Multi wildcard collision: /files/ and /files/{rest...}
+    try mux.handleFunc("GET /files/", dummy_fn);
+    try std.testing.expectError(error.PatternConflict, mux.handleFunc("GET /files/{rest...}", dummy_fn));
+
+    // 3. Single wildcard collision: /user/{id} and /user/{name}
+    try mux.handleFunc("GET /user/{id}", dummy_fn);
+    try std.testing.expectError(error.PatternConflict, mux.handleFunc("GET /user/{name}", dummy_fn));
+}
+
+test "e2e: Date header is generated and complies with RFC 9110" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("GET /date-check", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            try w.writeAll("ok");
+        }
+    }.handle);
+
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var server = http.Server.init(allocator, io, .{
+        .handler = mux.handler(),
+        .num_threads = 1,
+    });
+    server.listener = listener;
+    server.running.store(true, .release);
+    server.pool = try http.ThreadPool.create(allocator, io, 1, 1024);
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: *std.Io.net.Server) void {
+            while (s.running.load(.acquire)) {
+                const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
+                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
+                    stream.close(s.io);
+                };
+            }
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    const req = "GET /date-check HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    var vec = [1][]const u8{req};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+    var resp_buf: [512]u8 = undefined;
+    var total: usize = 0;
+    while (total < resp_buf.len) {
+        var r_vec = [1][]u8{resp_buf[total..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        total += n;
+    }
+    const resp_str = resp_buf[0..total];
+    try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp_str, "Date: ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp_str, " GMT\r\n") != null);
+
+    server.shutdown();
+    server_thread.join();
+}
+
+test "e2e: Expect: 100-continue is properly handled" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("POST /expect-test", struct {
+        fn handle(w: *http.ResponseWriter, r: *http.Request) anyerror!void {
+            if (r.body()) |b| {
+                const body = try b.readAllAlloc(w.arena, 1024);
+                try w.writeAll(body);
+            }
+        }
+    }.handle);
+
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var server = http.Server.init(allocator, io, .{
+        .handler = mux.handler(),
+        .num_threads = 1,
+    });
+    server.listener = listener;
+    server.running.store(true, .release);
+    server.pool = try http.ThreadPool.create(allocator, io, 1, 1024);
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: *std.Io.net.Server) void {
+            while (s.running.load(.acquire)) {
+                const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
+                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
+                    stream.close(s.io);
+                };
+            }
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    // Client sends head with Expect: 100-continue
+    const req_head = "POST /expect-test HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 12\r\nConnection: close\r\n\r\n";
+    var head_vec = [1][]const u8{req_head};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &head_vec } })).net_write;
+
+    // Client waits for 100 Continue
+    var interim_buf: [128]u8 = undefined;
+    var interim_vec = [1][]u8{&interim_buf};
+    const n_interim = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &interim_vec } })).net_read).data_len;
+    try std.testing.expect(std.mem.indexOf(u8, interim_buf[0..n_interim], "100 Continue") != null);
+
+    // Client sends body
+    const body_str = "hello-expect";
+    var body_vec = [1][]const u8{body_str};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &body_vec } })).net_write;
+
+    // Client reads final 200 OK response
+    var final_buf: [512]u8 = undefined;
+    var total_final: usize = 0;
+    while (total_final < final_buf.len) {
+        var r_vec = [1][]u8{final_buf[total_final..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        total_final += n;
+    }
+    const final_str = final_buf[0..total_final];
+    try std.testing.expect(std.mem.indexOf(u8, final_str, "200 OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, final_str, "hello-expect") != null);
+
+    server.shutdown();
+    server_thread.join();
+}
+
+test "e2e: Transfer-Encoding chunked with zero body emits terminal chunk and keeps connection alive" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("GET /empty-chunked", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            // Handler sets Transfer-Encoding: chunked without writing any body
+            try w.headers.set("Transfer-Encoding", "chunked");
+        }
+    }.handle);
+
+    try mux.handleFunc("GET /second-ping", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            try w.writeAll("pong-second");
+        }
+    }.handle);
+
+    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var server = http.Server.init(allocator, io, .{
+        .handler = mux.handler(),
+        .num_threads = 1,
+    });
+    server.listener = listener;
+    server.running.store(true, .release);
+    server.pool = try http.ThreadPool.create(allocator, io, 1, 1024);
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: *std.Io.net.Server) void {
+            while (s.running.load(.acquire)) {
+                const stream = l.accept(s.io) catch break;
+                if (!s.running.load(.acquire)) {
+                    stream.close(s.io);
+                    break;
+                }
+                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
+                    stream.close(s.io);
+                };
+            }
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    // Request 1: keep-alive request to /empty-chunked
+    const req1 = "GET /empty-chunked HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n";
+    var vec1 = [1][]const u8{req1};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec1 } })).net_write;
+
+    var resp_buf: [512]u8 = undefined;
+    var total1: usize = 0;
+    while (total1 < resp_buf.len) {
+        var r_vec = [1][]u8{resp_buf[total1..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        total1 += n;
+        if (std.mem.indexOf(u8, resp_buf[0..total1], "0\r\n\r\n") != null) break;
+    }
+    const resp1_str = resp_buf[0..total1];
+    try std.testing.expect(std.mem.indexOf(u8, resp1_str, "200 OK") != null);
+    try std.testing.expect(std.ascii.findIgnoreCase(resp1_str, "transfer-encoding: chunked") != null);
+    // Must include terminal 0\r\n\r\n chunk
+    try std.testing.expect(std.mem.indexOf(u8, resp1_str, "0\r\n\r\n") != null);
+
+    // Request 2: Send second request on the same Keep-Alive connection
+    const req2 = "GET /second-ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    var vec2 = [1][]const u8{req2};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec2 } })).net_write;
+
+    var resp2_buf: [512]u8 = undefined;
+    var total2: usize = 0;
+    while (total2 < resp2_buf.len) {
+        var r_vec2 = [1][]u8{resp2_buf[total2..]};
+        const n2 = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec2 } })).net_read).data_len;
+        if (n2 == 0) break;
+        total2 += n2;
+    }
+    const resp2_str = resp2_buf[0..total2];
+    try std.testing.expect(std.mem.indexOf(u8, resp2_str, "200 OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp2_str, "pong-second") != null);
 
     server.shutdown();
     server_thread.join();

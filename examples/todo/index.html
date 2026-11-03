@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lighting Todo SPA</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --card-hover: #26354a;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #38bdf8;
+      --primary-hover: #0ea5e9;
+      --border: #334155;
+      --danger: #ef4444;
+      --danger-hover: #dc2626;
+      --success: #10b981;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 40px 16px;
+    }
+    .app-container {
+      width: 100%;
+      max-width: 540px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    header {
+      text-align: center;
+    }
+    header h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: #fff;
+    }
+    header p {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      margin-top: 6px;
+    }
+    .card {
+      background-color: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+    }
+    .todo-form {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+    .todo-input {
+      flex: 1;
+      padding: 12px 16px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #0f172a;
+      color: var(--text);
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .todo-input:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+    }
+    .btn {
+      padding: 12px 20px;
+      border: none;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 0.2s, transform 0.1s;
+    }
+    .btn:active {
+      transform: scale(0.98);
+    }
+    .btn-primary {
+      background-color: var(--primary);
+      color: #0f172a;
+    }
+    .btn-primary:hover {
+      background-color: var(--primary-hover);
+    }
+    .filter-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 12px;
+    }
+    .filters {
+      display: flex;
+      gap: 6px;
+    }
+    .filter-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-muted);
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .filter-btn:hover {
+      color: var(--text);
+    }
+    .filter-btn.active {
+      background: #334155;
+      color: var(--primary);
+      border-color: var(--border);
+      font-weight: 600;
+    }
+    .todo-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .todo-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      transition: all 0.2s;
+    }
+    .todo-item:hover {
+      border-color: #475569;
+    }
+    .todo-content {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex: 1;
+      cursor: pointer;
+      overflow: hidden;
+    }
+    .checkbox {
+      width: 20px;
+      height: 20px;
+      border-radius: 5px;
+      border: 2px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+    .todo-item.completed .checkbox {
+      background-color: var(--success);
+      border-color: var(--success);
+    }
+    .checkbox::after {
+      content: "";
+      width: 5px;
+      height: 9px;
+      border: solid white;
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
+      display: none;
+      margin-bottom: 2px;
+    }
+    .todo-item.completed .checkbox::after {
+      display: block;
+    }
+    .todo-title {
+      font-size: 0.95rem;
+      word-break: break-word;
+      transition: all 0.2s;
+    }
+    .todo-item.completed .todo-title {
+      text-decoration: line-through;
+      color: var(--text-muted);
+    }
+    .btn-delete {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 1rem;
+      transition: all 0.2s;
+    }
+    .btn-delete:hover {
+      color: var(--danger);
+      background: rgba(239, 68, 68, 0.1);
+    }
+    .empty-state {
+      text-align: center;
+      color: var(--text-muted);
+      padding: 32px 0;
+      font-size: 0.9rem;
+    }
+    .footer-stats {
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+    .badge {
+      background: #334155;
+      padding: 2px 8px;
+      border-radius: 10px;
+      color: var(--primary);
+    }
+  </style>
+</head>
+<body>
+  <div class="app-container">
+    <header>
+      <h1>⚡️ Lighting Todo</h1>
+      <p>Zig 0.17 HTTP Server + SQLite Single Page App</p>
+    </header>
+
+    <div class="card">
+      <form class="todo-form" id="todo-form">
+        <input 
+          type="text" 
+          id="todo-input" 
+          class="todo-input" 
+          placeholder="What needs to be done?" 
+          autocomplete="off" 
+          required
+        />
+        <button type="submit" class="btn btn-primary">Add</button>
+      </form>
+
+      <div class="filter-bar">
+        <span id="items-left" class="badge">0 items</span>
+        <div class="filters">
+          <button class="filter-btn active" data-filter="all">All</button>
+          <button class="filter-btn" data-filter="active">Active</button>
+          <button class="filter-btn" data-filter="completed">Done</button>
+        </div>
+      </div>
+
+      <ul class="todo-list" id="todo-list">
+        <li class="empty-state">Loading todos...</li>
+      </ul>
+
+      <div class="footer-stats">
+        <span>Backend: SQLite (:memory: or disk)</span>
+        <span>Runtime: Zig 0.17</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let todos = [];
+    let currentFilter = 'all';
+
+    const todoList = document.getElementById('todo-list');
+    const todoForm = document.getElementById('todo-form');
+    const todoInput = document.getElementById('todo-input');
+    const itemsLeft = document.getElementById('items-left');
+    const filterButtons = document.querySelectorAll('.filter-btn');
+
+    async function fetchTodos() {
+      try {
+        const res = await fetch('/api/todos');
+        if (!res.ok) throw new Error('Failed to load todos');
+        todos = await res.json();
+        render();
+      } catch (err) {
+        todoList.innerHTML = `<li class="empty-state" style="color: var(--danger)">Error loading todos: ${err.message}</li>`;
+      }
+    }
+
+    async function addTodo(title) {
+      try {
+        const res = await fetch('/api/todos', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title })
+        });
+        if (!res.ok) throw new Error('Failed to create todo');
+        const created = await res.json();
+        todos.push(created);
+        render();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function toggleTodo(id) {
+      try {
+        const res = await fetch(`/api/todos/${id}/toggle`, { method: 'POST' });
+        if (!res.ok) throw new Error('Failed to toggle todo');
+        const item = todos.find(t => t.id === id);
+        if (item) item.completed = !item.completed;
+        render();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function deleteTodo(id) {
+      try {
+        const res = await fetch(`/api/todos/${id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Failed to delete todo');
+        todos = todos.filter(t => t.id !== id);
+        render();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    function render() {
+      const filtered = todos.filter(t => {
+        if (currentFilter === 'active') return !t.completed;
+        if (currentFilter === 'completed') return t.completed;
+        return true;
+      });
+
+      const activeCount = todos.filter(t => !t.completed).length;
+      itemsLeft.textContent = `${activeCount} item${activeCount === 1 ? '' : 's'} left`;
+
+      if (filtered.length === 0) {
+        todoList.innerHTML = `<li class="empty-state">No todos in this list.</li>`;
+        return;
+      }
+
+      todoList.innerHTML = filtered.map(t => `
+        <li class="todo-item ${t.completed ? 'completed' : ''}" data-id="${t.id}">
+          <div class="todo-content" onclick="toggleTodo(${t.id})">
+            <div class="checkbox"></div>
+            <span class="todo-title">${escapeHtml(t.title)}</span>
+          </div>
+          <button class="btn-delete" title="Delete" onclick="deleteTodo(${t.id})">&times;</button>
+        </li>
+      `).join('');
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/[&<>'"]/g, 
+        tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)
+      );
+    }
+
+    todoForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const val = todoInput.value.trim();
+      if (!val) return;
+      addTodo(val);
+      todoInput.value = '';
+    });
+
+    filterButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        filterButtons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentFilter = btn.dataset.filter;
+        render();
+      });
+    });
+
+    fetchTodos();
+  </script>
+</body>
+</html>

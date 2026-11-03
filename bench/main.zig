@@ -1,8 +1,10 @@
 const std = @import("std");
 const http = @import("lighting");
 
-pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
+    const port: u16 = if (init.environ_map.get("PORT")) |p| std.fmt.parseInt(u16, p, 10) catch 7000 else 7000;
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -62,7 +64,7 @@ pub fn main() !void {
         }
     }.handle);
 
-    var server = http.Server.init(allocator, .{
+    var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 64,
         .max_header_bytes = 16 * 1024,
@@ -73,6 +75,6 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    std.log.info("Server listening on http://127.0.0.1:9090...", .{});
-    try server.listenAndServe("127.0.0.1", 9090);
+    std.log.info("Server listening on http://127.0.0.1:{d}...", .{port});
+    try server.listenAndServe("127.0.0.1", port);
 }

@@ -30,6 +30,19 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run the benchmark server");
     bench_step.dependOn(&bench_cmd.step);
 
+    // Convenience steps to build and run examples using their own build.zig
+    const run_hello = b.addSystemCommand(&.{ "zig", "build", "run" });
+    run_hello.setCwd(b.path("examples/hello"));
+    run_hello.addPassthruArgs();
+    const run_hello_step = b.step("run-hello", "Run the hello example");
+    run_hello_step.dependOn(&run_hello.step);
+
+    const run_todo = b.addSystemCommand(&.{ "zig", "build", "run" });
+    run_todo.setCwd(b.path("examples/todo"));
+    run_todo.addPassthruArgs();
+    const run_todo_step = b.step("run-todo", "Run the todo example with sqlite and SPA");
+    run_todo_step.dependOn(&run_todo.step);
+
     const mod_tests = b.addTest(.{
         .name = "lighting_test",
         .root_module = mod,

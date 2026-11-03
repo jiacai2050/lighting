@@ -13,6 +13,7 @@ pub const URL = @import("request.zig").URL;
 pub const ResponseWriter = @import("response_writer.zig").ResponseWriter;
 
 pub const Handler = @import("handler.zig").Handler;
+pub const LoggingHandler = @import("handler.zig").LoggingHandler;
 pub const MiddlewareFn = @import("handler.zig").MiddlewareFn;
 
 pub const ServeMux = @import("mux.zig").ServeMux;

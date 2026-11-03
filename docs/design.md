@@ -181,15 +181,23 @@ flowchart TD
 * **Pipelining Deadlock Elimination**:
   Before calling the blocking socket read, `serveConn` inspects whether complete headers (`\r\n\r\n`) already reside in `conn_buf` from pipelined batches, avoiding false read timeouts.
 * **Bounded Body Drain (256 KB)**:
-  Paralleling Go's `maxPostHandlerReadBytes`, if a handler completes early and the unread body exceeds 256 KB, the server actively terminates the TCP connection to prevent resource exhaustion attacks.
+  Paralleling Go's `maxPostHandlerReadBytes`, if a handler completes early, the server drains up to 256 KB of remaining body bytes. If unread content exceeds 256 KB, the server actively terminates the TCP connection to prevent resource exhaustion attacks. If the body is exactly 256 KB, it drains to EOF and cleanly retains Keep-Alive reuse.
+* **Idle Connection Slicing & Worker Backpressure**:
+  To support graceful server shutdown and worker pool load shedding, idle Keep-Alive connections wait in 100ms read slices. If the thread pool has queued tasks (`pool.hasPendingTasks()`), idle workers actively yield the idle connection (closing it) to immediately serve newly queued pending requests.
 
-### 5.3 Comprehensive Timeout Protections
+### 5.3 Comprehensive Timeout & Protocol Protections
 * **Slowloris Mitigation (`read_header_timeout_ns`)**:
   Computes a fixed monotonic deadline timestamp (`Clock.Timestamp`) using `std.Io.Timeout.toDeadline(io)`. Even if an attacker trickles bytes at 1 byte/sec, reaching the absolute deadline triggers `408 Request Timeout` and severs the socket.
 * **Idle Connection Reclamation (`idle_timeout_ns`)**:
   Persistent Keep-Alive connections waiting between requests are subject to idle timeouts, closing silently without leaking file descriptors.
 * **Read / Write Deadlines (`read_timeout_ns` / `write_timeout_ns`)**:
   Seamlessly enforced within `BodyReader` and `ResponseWriter` socket loops.
+* **Expect: 100-continue Support (RFC 9110 §10.1.1)**:
+  When an HTTP/1.1 client sends `Expect: 100-continue`, the server immediately transmits `HTTP/1.1 100 Continue\r\n\r\n` before the handler blocks reading the body, preventing two-way deadlocks. Unrecognized expectations receive `417 Expectation Failed`.
+* **RFC 9110 §6.6.1 Date Header Enforcement**:
+  `ResponseWriter` automatically generates and formats a standard IMF-fixdate `Date` header (e.g. `Date: Sun, 06 Nov 1994 08:49:37 GMT`) on all responses unless explicitly overridden by the handler.
+* **Direct Socket Handle I/O (`src/proto/io_util.zig`)**:
+  Bypasses `std.Io.net.Stream.read/write` destructuring layers to perform zero-overhead vectored operations with absolute deadline support directly via `std.Io.Operation`.
 
 ---
 

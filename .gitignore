@@ -23,3 +23,5 @@ libroot*
 .zed/
 review.md
 .review/
+*.db
+*.db-journal

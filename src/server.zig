@@ -34,8 +34,7 @@ pub const Server = struct {
     active_conns_head: ?*ConnNode = null,
     active_conns_mutex: std.Io.Mutex = .init,
 
-    pub fn init(allocator: std.mem.Allocator, options: ServerOptions) Server {
-        const io = std.Io.Threaded.global_single_threaded.io();
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, options: ServerOptions) Server {
         return .{
             .allocator = allocator,
             .io = io,
@@ -259,6 +258,24 @@ pub const Server = struct {
             const header_bytes = head.bytes_consumed;
             const extra_in_buf = conn_buf[header_bytes..buf_len];
 
+            // RFC 9110 Section 10.1.1: Expect header handling
+            if (head.headers.get("expect")) |expect_hdr| {
+                const trimmed = std.mem.trim(u8, expect_hdr, " \t");
+                if (std.ascii.eqlIgnoreCase(trimmed, "100-continue")) {
+                    if (head.version == .@"HTTP/1.1") {
+                        const msg = [1][]const u8{"HTTP/1.1 100 Continue\r\n\r\n"};
+                        _ = io_util.writeSocketAll(stream, self.io, &msg) catch {
+                            return;
+                        };
+                    }
+                } else {
+                    // Unknown expectation: 417 Expectation Failed
+                    const msg = [1][]const u8{"HTTP/1.1 417 Expectation Failed\r\nConnection: close\r\n\r\n"};
+                    _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
+                    return;
+                }
+            }
+
             // Build BodyReader with absolute deadline
             var body_reader = BodyReader.init(
                 stream,
@@ -302,9 +319,14 @@ pub const Server = struct {
                     res.headers.delete("Content-Length");
                     res.headers.delete("Transfer-Encoding");
                     res.headers.delete("Connection");
-                    res.headers.set("Connection", "close") catch {};
+                    res.headers.set("Connection", "close") catch |set_err| {
+                        std.log.warn("Failed to set Connection: close on 500 error: {}", .{set_err});
+                    };
                     res.buffer_len = 0;
-                    res.writeAll("500 Internal Server Error\n") catch {};
+                    // Attempt best-effort 500 error response; client might already have disconnected
+                    res.writeAll("500 Internal Server Error\n") catch |write_err| {
+                        std.log.debug("Failed to write 500 error response body: {}", .{write_err});
+                    };
                 }
             };
 
@@ -324,18 +346,26 @@ pub const Server = struct {
                 var too_large = false;
                 var drain_failed = false;
 
-                while (true) {
+                while (total_discarded < max_discard) {
                     const to_read = @min(discard_buf.len, max_discard - total_discarded);
-                    if (to_read == 0) {
-                        too_large = true;
-                        break;
-                    }
                     const n = b.read(discard_buf[0..to_read]) catch {
                         drain_failed = true;
                         break;
                     };
                     if (n == 0) break;
                     total_discarded += n;
+                }
+
+                // If exactly max_discard bytes were read, probe 1 byte to check if stream has reached EOF
+                if (!drain_failed and total_discarded == max_discard) {
+                    var probe: [1]u8 = undefined;
+                    const n = b.read(&probe) catch blk: {
+                        drain_failed = true;
+                        break :blk 0;
+                    };
+                    if (n > 0) {
+                        too_large = true;
+                    }
                 }
 
                 if (too_large or drain_failed) {
