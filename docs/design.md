@@ -177,7 +177,10 @@ flowchart TD
 * **Amortized $O(1)$ Queue Scheduling**:
   Tracks task dequeue with a `queue_head` cursor, eliminating $O(N)$ array-shift memory copies; automatically compacts the queue when drained to bound slice growth.
 
-### 5.2 Keep-Alive and Pipelined Requests
+### 5.2 Experimental Evented Connection Tasks
+`ServerOptions.concurrency_model = .io_async` dispatches each connection with `std.Io.async`, tracks task futures, and bounds the number of in-flight connections with `max_async_connections`. With an Evented `std.Io` backend, socket operations can suspend a connection task without occupying one OS thread per connection. This is opt-in because `std.Io.async` behavior depends on the supplied I/O implementation; the fixed worker pool remains the default. Synchronous handlers still occupy the scheduler while executing CPU-bound or blocking work.
+
+### 5.3 Keep-Alive and Pipelined Requests
 * **Pipelining Deadlock Elimination**:
   Before calling the blocking socket read, `serveConn` inspects whether complete headers (`\r\n\r\n`) already reside in `conn_buf` from pipelined batches, avoiding false read timeouts.
 * **Bounded Body Drain (256 KB)**:
@@ -185,7 +188,7 @@ flowchart TD
 * **Idle Connection Slicing & Worker Backpressure**:
   To support graceful server shutdown and worker pool load shedding, idle Keep-Alive connections wait in 100ms read slices. If the thread pool has queued tasks (`pool.hasPendingTasks()`), idle workers actively yield the idle connection (closing it) to immediately serve newly queued pending requests.
 
-### 5.3 Comprehensive Timeout & Protocol Protections
+### 5.4 Comprehensive Timeout & Protocol Protections
 * **Slowloris Mitigation (`read_header_timeout_ns`)**:
   Computes a fixed monotonic deadline timestamp (`Clock.Timestamp`) using `std.Io.Timeout.toDeadline(io)`. Even if an attacker trickles bytes at 1 byte/sec, reaching the absolute deadline triggers `408 Request Timeout` and severs the socket.
 * **Idle Connection Reclamation (`idle_timeout_ns`)**:

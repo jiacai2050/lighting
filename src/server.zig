@@ -8,9 +8,16 @@ const BodyReader = @import("proto/chunk_reader.zig").BodyReader;
 const io_util = @import("proto/io_util.zig");
 
 pub const ServerOptions = struct {
+    pub const ConcurrencyModel = enum {
+        worker_pool,
+        io_async,
+    };
+
     handler: Handler,
     num_threads: usize = 64,
     max_queue_size: usize = 1024,
+    concurrency_model: ConcurrencyModel = .worker_pool,
+    max_async_connections: usize = 1024,
     max_header_bytes: usize = 8 * 1024,
     read_timeout_ns: ?u64 = null,
     read_header_timeout_ns: ?u64 = null,
@@ -33,6 +40,7 @@ pub const Server = struct {
     listener: ?std.Io.net.Server = null,
     active_conns_head: ?*ConnNode = null,
     active_conns_mutex: std.Io.Mutex = .init,
+    async_connections: std.ArrayListUnmanaged(std.Io.Future(void)) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: ServerOptions) Server {
         return .{
@@ -46,6 +54,8 @@ pub const Server = struct {
 
     pub fn deinit(self: *Server) void {
         self.shutdown();
+        self.drainAsyncConnections();
+        self.async_connections.deinit(self.allocator);
         if (self.pool) |p| {
             p.destroy();
             self.pool = null;
@@ -111,9 +121,16 @@ pub const Server = struct {
         self.listener = listener;
         self.running.store(true, .release);
 
-        self.pool = try ThreadPool.create(self.allocator, self.io, self.options.num_threads, self.options.max_queue_size);
+        if (self.options.concurrency_model == .worker_pool) {
+            self.pool = try ThreadPool.create(self.allocator, self.io, self.options.num_threads, self.options.max_queue_size);
+        }
 
         while (self.running.load(.acquire)) {
+            if (self.options.concurrency_model == .io_async) {
+                self.waitForAsyncCapacity();
+                if (!self.running.load(.acquire)) break;
+            }
+
             const stream = listener.accept(self.io) catch |err| {
                 if (!self.running.load(.acquire)) break;
                 // If listener was closed or interrupted, stop
@@ -126,16 +143,74 @@ pub const Server = struct {
                 }
             };
 
-            // Dispatch connection to worker pool
-            self.pool.?.spawn(serveConnWorker, .{ self, stream }) catch |err| {
-                if (err == error.QueueFull) {
-                    const msg = [1][]const u8{"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n"};
-                    _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
-                } else {
-                    std.log.warn("spawn worker error (dropping connection): {}", .{err});
+            if (self.options.concurrency_model == .io_async) {
+                self.spawnAsyncConnection(stream) catch |err| {
+                    std.log.warn("spawn async connection error (dropping connection): {}", .{err});
+                    stream.close(self.io);
+                };
+            } else {
+                // Dispatch connection to worker pool
+                self.pool.?.spawn(serveConnWorker, .{ self, stream }) catch |err| {
+                    if (err == error.QueueFull) {
+                        const msg = [1][]const u8{"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n"};
+                        _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
+                    } else {
+                        std.log.warn("spawn worker error (dropping connection): {}", .{err});
+                    }
+                    stream.close(self.io);
                 }
-                stream.close(self.io);
-            };
+            }
+        }
+
+        self.drainAsyncConnections();
+    }
+
+    fn spawnAsyncConnection(self: *Server, stream: std.Io.net.Stream) !void {
+        try self.async_connections.ensureUnusedCapacity(self.allocator, 1);
+        self.async_connections.appendAssumeCapacity(std.Io.async(self.io, serveConnWorker, .{ self, stream }));
+    }
+
+    fn reapCompletedAsyncConnections(self: *Server) void {
+        var i: usize = 0;
+        while (i < self.async_connections.items.len) {
+            if (self.async_connections.items[i].any_future == null) {
+                _ = self.async_connections.swapRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    fn waitForAsyncConnection(self: *Server) void {
+        self.reapCompletedAsyncConnections();
+        if (self.async_connections.items.len == 0) return;
+
+        const futures = self.allocator.alloc(*std.Io.AnyFuture, self.async_connections.items.len) catch {
+            _ = self.async_connections.swapRemove(0).await(self.io);
+            return;
+        };
+        defer self.allocator.free(futures);
+
+        for (self.async_connections.items, futures) |*future, *any_future| {
+            any_future.* = future.any_future orelse unreachable;
+        }
+
+        const completed = self.io.vtable.select(self.io.userdata, futures) catch 0;
+        _ = self.async_connections.swapRemove(completed).await(self.io);
+    }
+
+    fn waitForAsyncCapacity(self: *Server) void {
+        const limit = if (self.options.max_async_connections == 0) 1024 else self.options.max_async_connections;
+        self.reapCompletedAsyncConnections();
+        while (self.async_connections.items.len >= limit and self.running.load(.acquire)) {
+            self.waitForAsyncConnection();
+            self.reapCompletedAsyncConnections();
+        }
+    }
+
+    fn drainAsyncConnections(self: *Server) void {
+        while (self.async_connections.items.len > 0) {
+            _ = self.async_connections.pop().?.await(self.io);
         }
     }
 
@@ -388,3 +463,29 @@ pub const Server = struct {
         }
     }
 };
+
+test "Io async task tracking reaps inline completions" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const noop = struct {
+        fn handle(_: *ResponseWriter, _: *Request) anyerror!void {}
+    }.handle;
+    var server = Server.init(allocator, io, .{
+        .handler = Handler.fromFn(noop),
+        .concurrency_model = .io_async,
+    });
+    defer server.async_connections.deinit(allocator);
+
+    var completed = std.atomic.Value(bool).init(false);
+    const Worker = struct {
+        fn run(flag: *std.atomic.Value(bool)) void {
+            flag.store(true, .release);
+        }
+    };
+    try server.async_connections.append(allocator, std.Io.async(io, Worker.run, .{&completed}));
+
+    server.reapCompletedAsyncConnections();
+
+    try std.testing.expect(completed.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), server.async_connections.items.len);
+}

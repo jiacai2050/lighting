@@ -16,6 +16,8 @@ Lighting couples a zero-copy protocol parser with a futex-synchronized worker th
 * **Zero Idle CPU**: Worker threads wait directly in the OS kernel via futexes (`std.Io.Mutex` and `std.Io.Condition`), consuming **strictly 0.0% CPU** when no requests are being processed.
 * **Zero-Allocation Parsing**: Headers and URL paths are sliced directly from the socket buffer into the routing engine without intermediate string copies.
 
+An experimental `ServerOptions.concurrency_model = .io_async` mode dispatches connections with `std.Io.async` and bounds in-flight tasks using `max_async_connections`. To get lightweight, I/O-suspending tasks rather than OS-thread-backed work, the server must be given an Evented `std.Io` implementation. The worker-pool mode remains the default and is the recommended option when using a Threaded I/O implementation.
+
 ---
 
 ## 2. Environment Preparation & Tuning

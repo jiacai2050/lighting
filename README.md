@@ -27,6 +27,7 @@
 * **Dual-Mode ResponseWriter**: Automatically buffers small responses (< 4KB) to emit `Content-Length` in a single vectored write; streams larger responses via chunked transfer encoding.
 * **Production Defenses**: Built-in Slowloris mitigation with absolute header deadlines, idle Keep-Alive connection harvesting, and strict RFC 9112 request smuggling prevention.
 * **Futex Worker Pool**: Powered by Zig 0.17 kernel futexes (`std.Io.Mutex` and `std.Io.Condition`), guaranteeing true 0.0% idle CPU and amortized $O(1)$ task dispatch.
+* **Experimental Async Connections**: An opt-in `std.Io.async` mode can use lightweight I/O tasks with an Evented `std.Io` backend; the default remains the fixed worker pool.
 
 ---
 
@@ -91,6 +92,9 @@ pub fn main(init: std.process.Init) !void {
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
         .num_threads = 64,
+        // Optional: use with a std.Io.Evented-backed `io` for lightweight I/O concurrency.
+        // .concurrency_model = .io_async,
+        // .max_async_connections = 1024,
         .max_header_bytes = 16 * 1024,
         .read_header_timeout_ns = 5 * std.time.ns_per_s,  // 5s header deadline (Slowloris defense)
         .read_timeout_ns = 30 * std.time.ns_per_s,         // 30s body read deadline
