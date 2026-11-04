@@ -87,9 +87,12 @@ pub const Server = struct {
     fn unregisterConnNode(self: *Server, node: *ConnNode) void {
         self.active_conns_mutex.lockUncancelable(self.io);
         defer self.active_conns_mutex.unlock(self.io);
+        if (self.active_conns_head != node and node.prev == null and node.next == null) {
+            return; // Already unregistered
+        }
         if (node.prev) |prev| {
             prev.next = node.next;
-        } else {
+        } else if (self.active_conns_head == node) {
             self.active_conns_head = node.next;
         }
         if (node.next) |next| {
@@ -144,7 +147,8 @@ pub const Server = struct {
     }
 
     pub fn serveConn(self: *Server, stream: std.Io.net.Stream) void {
-        defer stream.close(self.io);
+        var close_stream = true;
+        defer if (close_stream) stream.close(self.io);
         var conn_node = ConnNode{ .stream = stream };
         self.registerConnNode(&conn_node);
         defer self.unregisterConnNode(&conn_node);
@@ -288,25 +292,40 @@ pub const Server = struct {
 
             // Invoke Handler (Catch error to avoid crash and isolate 500)
             self.options.handler.serveHTTP(&res, &req) catch |err| {
-                std.log.warn("Handler error (handled as 500): {}", .{err});
-                // Any error during handler terminates connection to prevent framing desync
-                head.keep_alive = false;
-                res.keep_alive = false;
-                if (!res.header_written) {
-                    res.setStatus(.internal_server_error);
-                    res.headers.delete("Content-Length");
-                    res.headers.delete("Transfer-Encoding");
-                    res.headers.delete("Connection");
-                    res.headers.set("Connection", "close") catch |set_err| {
-                        std.log.warn("Failed to set Connection: close on 500 error: {}", .{set_err});
-                    };
-                    res.buffer_len = 0;
-                    // Attempt best-effort 500 error response; client might already have disconnected
-                    res.writeAll("500 Internal Server Error\n") catch |write_err| {
-                        std.log.debug("Failed to write 500 error response body: {}", .{write_err});
-                    };
+                if (@errorReturnTrace()) |trace| {
+                    std.debug.dumpErrorReturnTrace(trace);
+                }
+                if (res.hijacked) {
+                    std.log.warn("Handler error on hijacked connection: {}", .{err});
+                } else {
+                    std.log.warn("Handler error (handled as 500): {}", .{err});
+                    // Any error during handler terminates connection to prevent framing desync
+                    head.keep_alive = false;
+                    res.keep_alive = false;
+                    if (!res.header_written) {
+                        res.setStatus(.internal_server_error);
+                        res.headers.delete("Content-Length");
+                        res.headers.delete("Transfer-Encoding");
+                        res.headers.delete("Connection");
+                        res.headers.set("Connection", "close") catch |set_err| {
+                            std.log.warn("Failed to set Connection: close on 500 error: {}", .{set_err});
+                        };
+                        res.buffer_len = 0;
+                        // Attempt best-effort 500 error response; client might already have disconnected
+                        res.writeAll("500 Internal Server Error\n") catch |write_err| {
+                            std.log.debug("Failed to write 500 error response body: {}", .{write_err});
+                        };
+                    }
                 }
             };
+
+            // If connection was hijacked, transfer socket ownership to handler,
+            // unregister from active server connections, and exit immediately
+            if (res.hijacked) {
+                close_stream = false;
+                self.unregisterConnNode(&conn_node);
+                return;
+            }
 
             // Finalize response
             res.finish() catch return;

@@ -16,6 +16,7 @@ pub const ResponseWriter = struct {
     is_head: bool = false,
     bytes_written: u64 = 0,
     write_timeout_ns: ?u64 = null,
+    hijacked: bool = false,
 
     // Dual-mode buffering
     buffer: [4096]u8 = undefined,
@@ -96,6 +97,7 @@ pub const ResponseWriter = struct {
 
     /// Appends data to internal buffer or flushes chunked
     pub fn write(self: *ResponseWriter, data: []const u8) !usize {
+        if (self.hijacked) return error.AlreadyHijacked;
         if (data.len == 0) return 0;
 
         // 1. If status does not allow a body (204, 304, 1xx), suppress body completely (RFC 9110)
@@ -138,39 +140,13 @@ pub const ResponseWriter = struct {
         }
 
         // Buffer full or headers already written
-        if (!self.header_written) {
-            // Need to flush headers. Since data didn't fit, check if user provided Content-Length
-            if (self.headers.get("content-length") == null) {
-                if (self.version == .@"HTTP/1.1") {
-                    self.chunked_mode = true;
-                    try self.headers.set("Transfer-Encoding", "chunked");
-                } else {
-                    // HTTP/1.0 does not support chunked; must close on EOF
-                    self.chunked_mode = false;
-                    self.keep_alive = false;
-                }
-            }
-            try self.flushHeaders();
-        }
+        try self.ensureHeadersWritten();
+        try self.flushBuffer();
 
         if (self.chunked_mode) {
-            // First flush any buffered data as a chunk
-            if (self.buffer_len > 0) {
-                try self.writeChunk(self.buffer[0..self.buffer_len]);
-                self.bytes_written += self.buffer_len;
-                self.buffer_len = 0;
-            }
-            // Then write this data as a chunk
             try self.writeChunk(data);
             self.bytes_written += data.len;
         } else {
-            // Direct write
-            if (self.buffer_len > 0) {
-                var vec = [1][]const u8{self.buffer[0..self.buffer_len]};
-                try io_util.writeSocketAllTimeout(self.stream, self.io, &vec, self.write_timeout_ns);
-                self.bytes_written += self.buffer_len;
-                self.buffer_len = 0;
-            }
             var vec = [1][]const u8{data};
             try io_util.writeSocketAllTimeout(self.stream, self.io, &vec, self.write_timeout_ns);
             self.bytes_written += data.len;
@@ -181,6 +157,88 @@ pub const ResponseWriter = struct {
 
     pub fn writeAll(self: *ResponseWriter, data: []const u8) !void {
         _ = try self.write(data);
+    }
+
+    /// Ensures status line and headers are written to the socket.
+    /// If Transfer-Encoding or Content-Length are not explicitly established, defaults to chunked for HTTP/1.1.
+    fn ensureHeadersWritten(self: *ResponseWriter) !void {
+        if (self.header_written) return;
+
+        // Check if user requested Transfer-Encoding
+        if (self.headers.get("transfer-encoding")) |te| {
+            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, te, " \t"), "chunked")) {
+                if (self.version == .@"HTTP/1.1") {
+                    self.chunked_mode = true;
+                }
+            } else {
+                return error.UnsupportedTransferEncoding;
+            }
+        }
+
+        // If user did not provide explicit Content-Length, transition to chunked mode in HTTP/1.1
+        if (self.headers.get("content-length") == null) {
+            if (self.version == .@"HTTP/1.1") {
+                self.chunked_mode = true;
+                try self.headers.set("Transfer-Encoding", "chunked");
+            } else {
+                self.chunked_mode = false;
+                self.keep_alive = false;
+            }
+        }
+
+        try self.flushHeaders();
+    }
+
+    /// Flushes any pending buffered data in `self.buffer` out to the socket.
+    fn flushBuffer(self: *ResponseWriter) !void {
+        if (self.buffer_len == 0) return;
+        if (self.chunked_mode) {
+            try self.writeChunk(self.buffer[0..self.buffer_len]);
+        } else {
+            var vec = [1][]const u8{self.buffer[0..self.buffer_len]};
+            try io_util.writeSocketAllTimeout(self.stream, self.io, &vec, self.write_timeout_ns);
+        }
+        self.bytes_written += self.buffer_len;
+        self.buffer_len = 0;
+    }
+
+    /// Flushes buffered data to the client immediately.
+    /// If headers have not been written yet, they are flushed now.
+    /// If Content-Length was not set, this transitions to chunked transfer encoding (in HTTP/1.1).
+    pub fn flush(self: *ResponseWriter) !void {
+        if (self.hijacked) return error.AlreadyHijacked;
+        if (!allowsBody(self.status_code) or self.is_head) return;
+
+        try self.ensureHeadersWritten();
+        try self.flushBuffer();
+    }
+
+    /// Hijacks the underlying connection, transferring ownership of the stream to the caller.
+    /// Any response data previously buffered in memory is flushed before returning the stream.
+    /// If an error occurs during flushing, the stream is not hijacked but partial bytes may have
+    /// already been written to the wire.
+    ///
+    /// Framing: If `Content-Length` was not set, the flushed prefix is framed as `Transfer-Encoding: chunked`
+    /// without a terminal chunk (`0\r\n\r\n`). Handlers should set `Content-Length` first, or hijack before
+    /// writing, for clean protocol framing.
+    ///
+    /// Lifecycle: After the handler returns, the server unregisters the connection from shutdown
+    /// tracking; until then `Server.shutdown()` may still interrupt the session.
+    ///
+    /// NOTE: Any trailing request bytes already read ahead by the server's connection buffer
+    /// (e.g. client early data or pipelined frames sent prior to the upgrade response) are not
+    /// forwarded. Callers should ensure protocols use request-response handshakes where the client
+    /// waits for the upgrade acknowledgement before sending frames.
+    pub fn hijack(self: *ResponseWriter) !std.Io.net.Stream {
+        if (self.hijacked) return error.AlreadyHijacked;
+        // If data was buffered in memory prior to hijacking, flush it out now so the client
+        // receives any handshake bytes sent via ResponseWriter before socket takeover.
+        if (self.buffer_len > 0) {
+            try self.flush();
+            if (self.buffer_len > 0) return error.CannotFlushBuffer;
+        }
+        self.hijacked = true;
+        return self.stream;
     }
 
     /// Internal helper to write a chunk: <hex_size>\r\n<data>\r\n
@@ -314,6 +372,7 @@ pub const ResponseWriter = struct {
 
     /// Called at the end of the request handler execution
     pub fn finish(self: *ResponseWriter) !void {
+        if (self.hijacked) return;
         const body_allowed = allowsBody(self.status_code);
 
         // Check if actual written + buffered is less than user-specified Content-Length
@@ -371,23 +430,12 @@ pub const ResponseWriter = struct {
             return;
         }
 
+        try self.flushBuffer();
+
         if (self.chunked_mode) {
-            // If there is residual data in buffer
-            if (self.buffer_len > 0) {
-                try self.writeChunk(self.buffer[0..self.buffer_len]);
-                self.bytes_written += self.buffer_len;
-                self.buffer_len = 0;
-            }
             // Send terminal 0\r\n\r\n chunk
             var final_vec = [1][]const u8{"0\r\n\r\n"};
             try io_util.writeSocketAllTimeout(self.stream, self.io, &final_vec, self.write_timeout_ns);
-        } else {
-            if (self.buffer_len > 0) {
-                var vec = [1][]const u8{self.buffer[0..self.buffer_len]};
-                try io_util.writeSocketAllTimeout(self.stream, self.io, &vec, self.write_timeout_ns);
-                self.bytes_written += self.buffer_len;
-                self.buffer_len = 0;
-            }
         }
 
         // Check if actual written was less than user-specified Content-Length

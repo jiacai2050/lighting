@@ -122,6 +122,10 @@ flowchart TD
   `flushHeaders()` utilizes a stack-allocated vector array `stack_vecs: [64][]const u8`. For 99.99% of requests, header serialization occurs entirely on the stack with zero heap allocation.
 * **RFC 9110 Section 8.6 Status Code Enforcement**:
   Automatically prohibits emitting `Content-Length` headers or body payloads for `204 No Content` and `304 Not Modified` responses.
+* **Explicit Chunk Streaming (`flush()`)**:
+  Allows handlers to emit partial response chunks immediately without waiting for buffer saturation. If headers have not been sent and no explicit `Content-Length` was declared, `flush()` transitions framing to `Transfer-Encoding: chunked`.
+* **Connection Takeover (`hijack()`)**:
+  Enables protocol upgrades (e.g., WebSocket). Flushes any pre-buffered response data before handing over the raw `std.Io.net.Stream`. If `Content-Length` was not declared, the flushed prefix is chunk-framed without a terminal chunk (`0\r\n\r\n`). Trailing request bytes already read into the connection buffer are not forwarded, so protocols must follow request-response handshake discipline. After the handler returns, the server unregisters the connection from shutdown tracking; until then `Server.shutdown()` may still interrupt long-running sessions.
 
 ---
 

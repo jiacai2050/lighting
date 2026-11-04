@@ -133,14 +133,6 @@ Detailed benchmarking methodologies, parameters, and results are available in [d
 
 ---
 
-
-## Technical Documentation
-
-* [docs/design.md](docs/design.md) - System Architecture, RFC Compliance, and Decision Tree Specifications.
-* [docs/benchmark.md](docs/benchmark.md) - Benchmarking Guide, Performance Methodology, and Metric Analysis.
-
----
-
 ## License
 
 [MIT](./LICENSE)
