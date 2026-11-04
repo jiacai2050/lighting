@@ -1,9 +1,18 @@
 const std = @import("std");
 const http = @import("root.zig");
 
+var test_threaded_runtime: ?std.Io.Threaded = null;
+
+fn getTestIo() std.Io {
+    if (test_threaded_runtime == null) {
+        test_threaded_runtime = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    }
+    return test_threaded_runtime.?.io();
+}
+
 test "e2e: GET, POST echo, and Keep-Alive" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -30,30 +39,15 @@ test "e2e: GET, POST echo, and Keep-Alive" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
     defer server.deinit();
 
-    // Start server loop in separate thread
-    const server_thread = try std.Thread.spawn(.{}, struct {
-        fn run(s: *http.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = s.listener.?.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(struct {
-                    fn handle(srv: *http.Server, strm: std.Io.net.Stream) void {
-                        srv.serveConn(strm);
-                    }
-                }.handle, .{ s, stream }) catch break;
-            }
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
-    }.run, .{&server});
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     // Run client tests
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
@@ -106,7 +100,7 @@ test "e2e: GET, POST echo, and Keep-Alive" {
 
 test "e2e: chunked transfer encoding" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -128,7 +122,6 @@ test "e2e: chunked transfer encoding" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
     server.listener = listener;
     server.running.store(true, .release);
@@ -168,7 +161,7 @@ test "e2e: chunked transfer encoding" {
 test "e2e: 431 header too large and 500 internal server error" {
     std.testing.log_level = .warn; // suppress error log during intentional error test
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -185,7 +178,6 @@ test "e2e: 431 header too large and 500 internal server error" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
         .max_header_bytes = 256, // small limit to easily test 431
     });
     server.listener = listener;
@@ -261,7 +253,7 @@ test "e2e: 431 header too large and 500 internal server error" {
 
 test "e2e: Go 1.22+ pattern routing with wildcards and 405 Method Not Allowed" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -298,7 +290,6 @@ test "e2e: Go 1.22+ pattern routing with wildcards and 405 Method Not Allowed" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
     server.listener = listener;
     server.running.store(true, .release);
@@ -394,7 +385,7 @@ test "e2e: Go 1.22+ pattern routing with wildcards and 405 Method Not Allowed" {
 
 test "e2e: Server header and idle timeout handling" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -411,7 +402,6 @@ test "e2e: Server header and idle timeout handling" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
         .read_header_timeout_ns = 50 * std.time.ns_per_ms, // 50ms header timeout
         .idle_timeout_ns = 50 * std.time.ns_per_ms, // 50ms idle timeout
     });
@@ -497,7 +487,7 @@ test "e2e: Server header and idle timeout handling" {
 
 test "e2e: HTTP pipelining and RFC compliance (400 on missing Host, 204 No Content)" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -520,7 +510,6 @@ test "e2e: HTTP pipelining and RFC compliance (400 on missing Host, 204 No Conte
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
     server.listener = listener;
     server.running.store(true, .release);
@@ -709,39 +698,9 @@ test "e2e: response header CRLF and control character injection" {
     try std.testing.expectEqualStrings("standard value 123 !", headers.get("X-Good-Header").?);
 }
 
-test "e2e: ThreadPool QueueFull backpressure and error recovery" {
-    const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    // Pool with 1 thread, max queue size 1
-    const pool = try http.ThreadPool.create(allocator, io, 1, 1);
-    defer pool.destroy();
-
-    const Blocker = struct {
-        fn run(io_ctx: std.Io) void {
-            io_ctx.sleep(.{ .nanoseconds = 50 * std.time.ns_per_ms }, .boot) catch {};
-        }
-    };
-
-    // 1. Task occupying the single worker
-    try pool.spawn(Blocker.run, .{io});
-    // Give it a tiny moment to pick up
-    try io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .boot);
-
-    // 2. Queue the single permitted task
-    try pool.spawn(Blocker.run, .{io});
-
-    // 3. Queue is now full: next spawn must fail with QueueFull
-    try std.testing.expectError(error.QueueFull, pool.spawn(Blocker.run, .{io}));
-
-    // Wait for tasks to drain cleanly
-    try io.sleep(.{ .nanoseconds = 120 * std.time.ns_per_ms }, .boot);
-    try std.testing.expect(!pool.hasPendingTasks());
-}
-
 test "e2e: HEAD suppression, 204 suppression, Content-Length guards" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -782,28 +741,15 @@ test "e2e: HEAD suppression, 204 suppression, Content-Length guards" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
 
@@ -885,7 +831,7 @@ test "e2e: HEAD suppression, 204 suppression, Content-Length guards" {
 
 test "e2e: shutdown interrupts idle keep-alive connections without hanging" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -902,28 +848,15 @@ test "e2e: shutdown interrupts idle keep-alive connections without hanging" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     // Client connects and sends Keep-Alive request
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
@@ -953,7 +886,7 @@ test "e2e: shutdown interrupts idle keep-alive connections without hanging" {
 
 test "e2e: worker pool yields idle keep-alive connection when queue has pending tasks" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -971,29 +904,16 @@ test "e2e: worker pool yields idle keep-alive connection when queue has pending 
     // Server with only 1 worker thread!
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 1,
         .idle_timeout_ns = 5 * std.time.ns_per_s, // long idle timeout: 5s
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 1, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
 
@@ -1044,7 +964,7 @@ test "e2e: worker pool yields idle keep-alive connection when queue has pending 
 
 test "e2e: handler error forces Connection: close and prevents connection reuse" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -1061,28 +981,15 @@ test "e2e: handler error forces Connection: close and prevents connection reuse"
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });
@@ -1119,7 +1026,7 @@ test "e2e: handler error forces Connection: close and prevents connection reuse"
 
 test "e2e: status 205 and header stripping on bodyless responses" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -1149,28 +1056,15 @@ test "e2e: status 205 and header stripping on bodyless responses" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
 
@@ -1232,7 +1126,7 @@ test "e2e: status 205 and header stripping on bodyless responses" {
 
 test "e2e: monotonic read deadline stops Slow Post trickle" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -1251,29 +1145,16 @@ test "e2e: monotonic read deadline stops Slow Post trickle" {
     // read_timeout_ns = 150ms
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
         .read_timeout_ns = 150 * std.time.ns_per_ms,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });
@@ -1304,7 +1185,7 @@ test "e2e: monotonic read deadline stops Slow Post trickle" {
 
 test "e2e: duplicate chunked and forbidden chunk trailers rejected" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -1322,28 +1203,15 @@ test "e2e: duplicate chunked and forbidden chunk trailers rejected" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
 
@@ -1396,7 +1264,7 @@ test "e2e: duplicate chunked and forbidden chunk trailers rejected" {
 
 test "e2e: truncated body or handler error enforces Connection: close in headers" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -1424,28 +1292,15 @@ test "e2e: truncated body or handler error enforces Connection: close in headers
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
 
@@ -1503,7 +1358,7 @@ test "e2e: truncated body or handler error enforces Connection: close in headers
 
 test "e2e: HTTP/1.0 request receives HTTP/1.0 status line and no chunked encoding" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -1529,28 +1384,15 @@ test "e2e: HTTP/1.0 request receives HTTP/1.0 status line and no chunked encodin
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
 
@@ -1600,7 +1442,7 @@ test "e2e: HTTP/1.0 request receives HTTP/1.0 status line and no chunked encodin
 
 test "e2e: Host case-insensitivity and IPv6 routing in live server" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -1617,28 +1459,15 @@ test "e2e: Host case-insensitivity and IPv6 routing in live server" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
 
@@ -1672,7 +1501,7 @@ test "e2e: Host case-insensitivity and IPv6 routing in live server" {
 
 test "e2e: RFC 9112 request-target rejection in live server" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -1690,28 +1519,15 @@ test "e2e: RFC 9112 request-target rejection in live server" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
 
@@ -1766,7 +1582,7 @@ test "e2e: RFC 9112 request-target rejection in live server" {
 
 test "e2e: absolute-form request targets and routing" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -1798,28 +1614,15 @@ test "e2e: absolute-form request targets and routing" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 2,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 2, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
 
@@ -1898,7 +1701,7 @@ test "e2e: absolute-form request targets and routing" {
 
 test "e2e: invalid Content-Length is rejected" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -1916,28 +1719,15 @@ test "e2e: invalid Content-Length is rejected" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 1,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 1, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });
@@ -1966,7 +1756,7 @@ test "e2e: invalid Content-Length is rejected" {
 
 test "e2e: Transfer-Encoding chunked synchronization" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -1984,28 +1774,15 @@ test "e2e: Transfer-Encoding chunked synchronization" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 1,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 1, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });
@@ -2036,7 +1813,7 @@ test "e2e: Transfer-Encoding chunked synchronization" {
 
 test "e2e: body of exactly 256KB is cleanly drained and retains keep-alive" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -2060,28 +1837,15 @@ test "e2e: body of exactly 256KB is cleanly drained and retains keep-alive" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 1,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 1, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });
@@ -2137,7 +1901,7 @@ test "e2e: body of exactly 256KB is cleanly drained and retains keep-alive" {
 
 test "e2e: chunk reader line boundary exact capacity acceptance" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     // Construct raw chunked stream with a trailer line of exactly 1024 bytes (e.g. "X-Custom: " + 994 bytes of 'a' + "\r\n")
     // Total trailer line without CRLF = 10 + 1014 = 1024 bytes!
@@ -2188,7 +1952,7 @@ test "e2e: ServeMux route registration conflict returns error.PatternConflict" {
 
 test "e2e: Date header is generated and complies with RFC 9110" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -2205,28 +1969,15 @@ test "e2e: Date header is generated and complies with RFC 9110" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 1,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 1, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });
@@ -2255,7 +2006,7 @@ test "e2e: Date header is generated and complies with RFC 9110" {
 
 test "e2e: Expect: 100-continue is properly handled" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -2275,28 +2026,15 @@ test "e2e: Expect: 100-continue is properly handled" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 1,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 1, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });
@@ -2337,7 +2075,7 @@ test "e2e: Expect: 100-continue is properly handled" {
 
 test "e2e: Transfer-Encoding chunked with zero body emits terminal chunk and keeps connection alive" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = getTestIo();
 
     var mux = http.ServeMux.init(allocator);
     defer mux.deinit();
@@ -2361,28 +2099,15 @@ test "e2e: Transfer-Encoding chunked with zero body emits terminal chunk and kee
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 1,
     });
-    server.listener = listener;
-    server.running.store(true, .release);
-    server.pool = try http.ThreadPool.create(allocator, io, 1, 1024);
     defer server.deinit();
 
     const ServerThread = struct {
-        fn run(s: *http.Server, l: *std.Io.net.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = l.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.pool.?.spawn(http.Server.serveConn, .{ s, stream }) catch {
-                    stream.close(s.io);
-                };
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, &listener });
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });

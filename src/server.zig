@@ -2,15 +2,12 @@ const std = @import("std");
 const Handler = @import("handler.zig").Handler;
 const Request = @import("request.zig").Request;
 const ResponseWriter = @import("response_writer.zig").ResponseWriter;
-const ThreadPool = @import("thread_pool.zig").ThreadPool;
 const parseRequestHead = @import("proto/parser.zig").parseRequestHead;
 const BodyReader = @import("proto/chunk_reader.zig").BodyReader;
 const io_util = @import("proto/io_util.zig");
 
 pub const ServerOptions = struct {
     handler: Handler,
-    num_threads: usize = 64,
-    max_queue_size: usize = 1024,
     max_header_bytes: usize = 8 * 1024,
     read_timeout_ns: ?u64 = null,
     read_header_timeout_ns: ?u64 = null,
@@ -28,7 +25,7 @@ pub const Server = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     options: ServerOptions,
-    pool: ?*ThreadPool = null,
+    group: std.Io.Group = .init,
     running: std.atomic.Value(bool) = .init(false),
     listener: ?std.Io.net.Server = null,
     active_conns_head: ?*ConnNode = null,
@@ -39,6 +36,7 @@ pub const Server = struct {
             .allocator = allocator,
             .io = io,
             .options = options,
+            .group = .init,
             .active_conns_head = null,
             .active_conns_mutex = .init,
         };
@@ -46,10 +44,6 @@ pub const Server = struct {
 
     pub fn deinit(self: *Server) void {
         self.shutdown();
-        if (self.pool) |p| {
-            p.destroy();
-            self.pool = null;
-        }
     }
 
     pub fn shutdown(self: *Server) void {
@@ -105,16 +99,16 @@ pub const Server = struct {
         node.next = null;
     }
 
-    pub fn listenAndServe(self: *Server, host: []const u8, port: u16) !void {
-        const addr = try std.Io.net.IpAddress.parseIp4(host, port);
-        var listener = try addr.listen(self.io, .{ .reuse_address = true });
+    pub fn serve(self: *Server, listener: std.Io.net.Server) !void {
         self.listener = listener;
         self.running.store(true, .release);
 
-        self.pool = try ThreadPool.create(self.allocator, self.io, self.options.num_threads, self.options.max_queue_size);
+        defer {
+            self.group.cancel(self.io);
+        }
 
         while (self.running.load(.acquire)) {
-            const stream = listener.accept(self.io) catch |err| {
+            const stream = self.listener.?.accept(self.io) catch |err| {
                 if (!self.running.load(.acquire)) break;
                 // If listener was closed or interrupted, stop
                 switch (err) {
@@ -126,17 +120,23 @@ pub const Server = struct {
                 }
             };
 
-            // Dispatch connection to worker pool
-            self.pool.?.spawn(serveConnWorker, .{ self, stream }) catch |err| {
-                if (err == error.QueueFull) {
+            // Dispatch connection concurrently via std.Io.Group
+            self.group.concurrent(self.io, serveConnWorker, .{ self, stream }) catch |err| {
+                if (err == error.ConcurrencyUnavailable) {
                     const msg = [1][]const u8{"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n"};
                     _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
                 } else {
-                    std.log.warn("spawn worker error (dropping connection): {}", .{err});
+                    std.log.warn("spawn concurrent worker error (dropping connection): {}", .{err});
                 }
                 stream.close(self.io);
             };
         }
+    }
+
+    pub fn listenAndServe(self: *Server, host: []const u8, port: u16) !void {
+        const addr = try std.Io.net.IpAddress.parseIp4(host, port);
+        const listener = try addr.listen(self.io, .{ .reuse_address = true });
+        return self.serve(listener);
     }
 
     fn serveConnWorker(server: *Server, stream: std.Io.net.Stream) void {
@@ -173,13 +173,8 @@ pub const Server = struct {
                     return;
                 }
 
-                // If connection is idle between requests, read in small time slices (100ms)
-                // so we can promptly release worker if tasks are queued or server is shutting down
+                // If connection is idle between requests, wait until next request or idle timeout
                 if (is_idle and buf_len == 0) {
-                    if (self.pool) |p| {
-                        if (p.hasPendingTasks()) return;
-                    }
-
                     if (idle_deadline == null) {
                         if (self.options.idle_timeout_ns orelse self.options.read_timeout_ns) |ns| {
                             const dur = std.Io.Timeout{ .duration = .{ .raw = .{ .nanoseconds = @intCast(ns) }, .clock = .boot } };
@@ -189,25 +184,8 @@ pub const Server = struct {
                         }
                     }
 
-                    const slice_timeout: std.Io.Timeout = .{
-                        .duration = .{ .raw = .{ .nanoseconds = 100 * std.time.ns_per_ms }, .clock = .boot },
-                    };
-
-                    const n = io_util.readSocketWithTimeout(stream, self.io, conn_buf[0..], slice_timeout) catch |err| {
-                        if (err == error.Timeout) {
-                            if (!self.running.load(.acquire)) return;
-                            if (self.pool) |p| {
-                                if (p.hasPendingTasks()) return;
-                            }
-                            if (idle_deadline.? != .none) {
-                                if (idle_deadline.?.toDurationFromNow(self.io)) |d| {
-                                    if (d.raw.nanoseconds <= 0) return;
-                                } else {
-                                    return;
-                                }
-                            }
-                            continue;
-                        }
+                    const n = io_util.readSocketWithTimeout(stream, self.io, conn_buf[0..], idle_deadline.?) catch |err| {
+                        if (err == error.Timeout) return;
                         return;
                     };
                     if (n == 0) return;

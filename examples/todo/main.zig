@@ -105,7 +105,6 @@ pub fn main(init: std.process.Init) !void {
 
     var server = http.Server.init(allocator, io, .{
         .handler = logging.handler(),
-        .num_threads = 8,
     });
     defer server.deinit();
 

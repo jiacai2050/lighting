@@ -26,10 +26,10 @@ jobs:
         uses: mlugg/setup-zig@v2
 
       - name: Check Formatting
-        run: zig fmt --check .
+        run: make fmt-check
 
       - name: Build Library and Executable (Debug)
-        run: zig build
+        run: make build
 
       - name: Run Test Suite
-        run: zig build test --summary all
+        run: make test

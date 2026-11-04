@@ -40,8 +40,8 @@ zig-server/
     ├── request.zig           # Request struct, URL parsing, and pathValue extraction
     ├── response_writer.zig   # Dual-mode buffering ResponseWriter (Auto Content-Length / Chunked)
     ├── header.zig            # Case-insensitive HeaderMap (order-preserving, multi-value support)
-    ├── thread_pool.zig       # Futex-synchronized fixed worker pool (O(1) cursor queue)
-    ├── e2e_test.zig          # End-to-end integration test suite (19 tests)
+    ├── thread_pool.zig       # Futex-synchronized worker pool (O(1) cursor queue)
+    ├── e2e_test.zig          # End-to-end integration test suite (83 tests)
     └── proto/
         ├── method.zig        # HTTP Method enum and zero-copy string parsing
         ├── status.zig        # HTTP Status Code and status phrase mappings
@@ -58,9 +58,9 @@ flowchart TD
     classDef process stroke:#059669,stroke-width:2px;
     classDef decision stroke:#d97706,stroke-width:2px;
 
-    Client(["HTTP Client"]) -->|"TCP Connection"| Listener["Server.listenAndServe Accept Loop"]
-    Listener -->|"Dispatch"| Pool["ThreadPool (Worker Pool)"]
-    Pool -->|"serveConn"| ConnBuf["Connection Read Buffer (8KB ~ 16KB)"]
+    Client(["HTTP Client"]) -->|"TCP Connection"| Listener["Server.serve / listenAndServe Accept Loop"]
+    Listener -->|"self.group.concurrent"| Fiber["std.Io.Group Fiber / Task"]
+    Fiber -->|"serveConn"| ConnBuf["Connection Read Buffer (8KB ~ 16KB)"]
     
     subgraph Connection_Loop ["Keep-Alive Loop (serveConn)"]
         direction TB
@@ -171,19 +171,21 @@ flowchart TD
 
 ## 5. Concurrency, Memory, and Lifecycle Management
 
-### 5.1 Futex High-Performance Worker Pool (`src/thread_pool.zig`)
-* **Zero Busy Waiting**:
-  Replaces spin-locking (`tryLock() + yield()`) with Zig 0.17's native `std.Io.Mutex` and `std.Io.Condition`. When the task queue is empty, worker threads sleep directly in the OS kernel via futexes, achieving **0.0% idle CPU**.
-* **Amortized $O(1)$ Queue Scheduling**:
-  Tracks task dequeue with a `queue_head` cursor, eliminating $O(N)$ array-shift memory copies; automatically compacts the queue when drained to bound slice growth.
+### 5.1 Go-Aligned Structured Concurrency (`std.Io.Group.concurrent`)
+* **Go `net/http` Parity (`go c.serve()`)**:
+  Instead of a fixed OS thread pool with a bounded task queue, `Server` adopts Zig 0.17's native structured concurrency via `std.Io.Group`. Each accepted connection is immediately spawned with `group.concurrent(io, serveConnWorker, .{ self, stream })`.
+* **Zero OS Thread Starvation & Fiber Execution**:
+  Under `std.Io.Evented` (Linux `io_uring`, macOS `Dispatch`, BSD `kqueue`), connections run as lightweight user-space Fibers (green threads) with non-blocking I/O. Idle Keep-Alive connections do not consume OS threads or CPU.
+* **Deterministic Structured Lifecycle**:
+  The lifetime of all connection tasks is anchored to `std.Io.Group`. When shutting down, `group.cancel(io)` cleanly terminates all active tasks and reclaims Fiber stacks with zero memory leaks.
 
 ### 5.2 Keep-Alive and Pipelined Requests
 * **Pipelining Deadlock Elimination**:
   Before calling the blocking socket read, `serveConn` inspects whether complete headers (`\r\n\r\n`) already reside in `conn_buf` from pipelined batches, avoiding false read timeouts.
 * **Bounded Body Drain (256 KB)**:
   Paralleling Go's `maxPostHandlerReadBytes`, if a handler completes early, the server drains up to 256 KB of remaining body bytes. If unread content exceeds 256 KB, the server actively terminates the TCP connection to prevent resource exhaustion attacks. If the body is exactly 256 KB, it drains to EOF and cleanly retains Keep-Alive reuse.
-* **Idle Connection Slicing & Worker Backpressure**:
-  To support graceful server shutdown and worker pool load shedding, idle Keep-Alive connections wait in 100ms read slices. If the thread pool has queued tasks (`pool.hasPendingTasks()`), idle workers actively yield the idle connection (closing it) to immediately serve newly queued pending requests.
+* **Direct Idle Deadline Wait (Zero Slicing Overhead)**:
+  Because idle connections in the Fiber/Concurrent model do not block OS worker threads, idle Keep-Alive waits are passed directly to `io_util.readSocketWithTimeout` with the absolute `idle_deadline`. Sockets sleep directly in the OS event loop without CPU-wasting periodic time slices.
 
 ### 5.3 Comprehensive Timeout & Protocol Protections
 * **Slowloris Mitigation (`read_header_timeout_ns`)**:
@@ -205,7 +207,7 @@ flowchart TD
 
 ### 6.1 Automated Integration Tests
 Run `zig build test --summary all`:
-* **19/19 tests pass**.
+* **83/83 tests pass**.
 * Test coverage includes: Zero-copy request line/header parsing, chunked decoding and trailer absorption, dual-mode ResponseWriter, Keep-Alive connection reuse, **HTTP pipelining batch execution**, request smuggling defenses, 204/304 status code compliance, Go 1.22 decision tree routing, 405 Method Not Allowed, 408 Slowloris termination, and 256 KB body drain caps.
 
 ### 6.2 Concurrency Benchmark Results (Apple Silicon, 8 Worker Threads)

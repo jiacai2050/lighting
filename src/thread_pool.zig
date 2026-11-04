@@ -1,5 +1,13 @@
+//! [UNUSED NOW / DEPRECATED]
+//! This custom OS worker thread pool was previously used for dispatching connections.
+//! Lighting now adopts Zig 0.17's native structured concurrency model via `std.Io.Group.concurrent`
+//! (paralleling Go's `go c.serve()`), allowing direct Fiber coroutine scheduling and zero OS thread starvation.
+//! This file is retained temporarily for backward reference and test compatibility.
+
 const std = @import("std");
 
+/// Deprecated / Unused: Concurrency is now handled by std.Io.Group.concurrent.
+///
 /// A production-grade fixed-size worker thread pool for dispatching connection tasks.
 /// Uses std.Io.Mutex and std.Io.Condition (futex-based) to guarantee 0% CPU consumption when idle,
 /// and O(1) task dequeue.
@@ -236,4 +244,34 @@ test "ThreadPool: create failure cleans up self and threads without leaks" {
     // 2. Fail on second allocation (threads array)
     var failing_alloc2 = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
     try std.testing.expectError(error.OutOfMemory, ThreadPool.create(failing_alloc2.allocator(), io, 2, 1024));
+}
+
+test "ThreadPool: QueueFull backpressure and error recovery" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Pool with 1 thread, max queue size 1
+    const pool = try ThreadPool.create(allocator, io, 1, 1);
+    defer pool.destroy();
+
+    const Blocker = struct {
+        fn run(io_ctx: std.Io) void {
+            io_ctx.sleep(.{ .nanoseconds = 50 * std.time.ns_per_ms }, .boot) catch {};
+        }
+    };
+
+    // 1. Task occupying the single worker
+    try pool.spawn(Blocker.run, .{io});
+    // Give it a tiny moment to pick up
+    try io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .boot);
+
+    // 2. Queue the single permitted task
+    try pool.spawn(Blocker.run, .{io});
+
+    // 3. Queue is now full: next spawn must fail with QueueFull
+    try std.testing.expectError(error.QueueFull, pool.spawn(Blocker.run, .{io}));
+
+    // Wait for tasks to drain cleanly
+    try io.sleep(.{ .nanoseconds = 120 * std.time.ns_per_ms }, .boot);
+    try std.testing.expect(!pool.hasPendingTasks());
 }

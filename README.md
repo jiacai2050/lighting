@@ -26,7 +26,7 @@
 * **Zero-Copy Parser**: Request lines, paths, and headers are sliced directly from the socket buffer without heap allocations.
 * **Dual-Mode ResponseWriter**: Automatically buffers small responses (< 4KB) to emit `Content-Length` in a single vectored write; streams larger responses via chunked transfer encoding.
 * **Production Defenses**: Built-in Slowloris mitigation with absolute header deadlines, idle Keep-Alive connection harvesting, and strict RFC 9112 request smuggling prevention.
-* **Futex Worker Pool**: Powered by Zig 0.17 kernel futexes (`std.Io.Mutex` and `std.Io.Condition`), guaranteeing true 0.0% idle CPU and amortized $O(1)$ task dispatch.
+* **Go-Style Structured Concurrency**: Built on Zig 0.17's `std.Io.Group.concurrent` to dispatch connections concurrently (paralleling Go's `go c.serve()`), enabling lightweight Fiber coroutine execution with zero OS thread starvation.
 
 ---
 
@@ -90,7 +90,6 @@ pub fn main(init: std.process.Init) !void {
     // 6. Configure production timeouts and start the server
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .num_threads = 64,
         .max_header_bytes = 16 * 1024,
         .read_header_timeout_ns = 5 * std.time.ns_per_s,  // 5s header deadline (Slowloris defense)
         .read_timeout_ns = 30 * std.time.ns_per_s,         // 30s body read deadline
@@ -116,45 +115,24 @@ pub fn main(init: std.process.Init) !void {
 
 ## Benchmarks
 
-Benchmark executed on an 8-core Apple Silicon developer workstation using ApacheBench (`ab -k -c 50 -n 10000`):
+Benchmark executed on a 12-core Apple M2 Pro MacBook using [wrk](https://github.com/wg/wrk):
 
 ```text
-Server Hostname:        127.0.0.1
-Server Port:            9090
-
-Document Path:          /users/42
-Document Length:        17 bytes
-
-Concurrency Level:      50
-Time taken for tests:   0.120 seconds
-Complete requests:      10000
-Failed requests:        0
-Keep-Alive requests:    10000
-Requests per second:    83,434.15 [#/sec] (mean)
-Time per request:       0.599 [ms] (mean)
-Time per request:       0.012 [ms] (mean, across all concurrent requests)
-Transfer rate:          9125.61 [Kbytes/sec] received
+$ wrk -t4 -c50 -d10s -H "Connection: keep-alive" http://127.0.0.1:7000/ping
+Running 10s test @ http://127.0.0.1:7000/ping
+  4 threads and 50 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.24ms    1.45ms  20.95ms   87.93%
+    Req/Sec    13.12k     2.97k   22.32k    73.76%
+  527537 requests in 10.10s, 72.95MB read
+Requests/sec:  52208.26
+Transfer/sec:      7.22MB
 ```
 
 Detailed benchmarking methodologies, parameters, and results are available in [docs/benchmark.md](docs/benchmark.md).
 
 ---
 
-## Testing
-
-Lighting includes an end-to-end integration test suite verifying HTTP pipelining, request smuggling defenses, timeout terminations, and chunked encoding trailers:
-
-```bash
-zig build test --summary all
-```
-
-```text
-Build Summary: 5/5 steps succeeded; 19/19 tests passed
-test success
-+- run test 19 pass (19 total) 232ms MaxRSS:3M
-```
-
----
 
 ## Technical Documentation
 

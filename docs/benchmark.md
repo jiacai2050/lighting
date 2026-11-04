@@ -1,8 +1,8 @@
 # Lighting HTTP/1.1 Server Benchmark Guide & Methodology
 
-> **Target Version**: Zig 0.17.0  
-> **Default Port**: `9090`  
-> **Server Binary**: `bench/main.zig`  
+> **Target Version**: Zig 0.17.0
+> **Default Port**: `7000`
+> **Server Binary**: `bench/main.zig`
 
 This document provides a comprehensive guide for conducting load tests, benchmarking throughput, and measuring latency characteristics of the **Lighting** HTTP/1.1 server.
 
@@ -10,10 +10,10 @@ This document provides a comprehensive guide for conducting load tests, benchmar
 
 ## 1. Concurrency Model & Architecture Notes
 
-Lighting couples a zero-copy protocol parser with a futex-synchronized worker thread pool:
-* **Connection Lifecycle**: Each incoming TCP connection accepted by the listener is dispatched to the worker pool.
-* **Worker Sizing (`num_threads`)**: In a synchronous blocking I/O model, persistent Keep-Alive connections hold a worker thread while active or idle between pipelined requests. Ensure `num_threads` in `ServerOptions` is configured to at least match the target client concurrency (defaults to `64`).
-* **Zero Idle CPU**: Worker threads wait directly in the OS kernel via futexes (`std.Io.Mutex` and `std.Io.Condition`), consuming **strictly 0.0% CPU** when no requests are being processed.
+Lighting couples a zero-copy protocol parser with Zig 0.17 structured concurrency (`std.Io.Group.concurrent`):
+* **Connection Lifecycle**: Each incoming TCP connection accepted by the listener is dispatched concurrently via `self.group.concurrent(self.io, serveConnWorker, .{ self, stream })`, matching Go's `go c.serve()` model.
+* **Lightweight Concurrency & Fiber Execution**: Under `std.Io.Evented` (such as Linux `io_uring` or BSD `kqueue`), connections are handled as lightweight user-space Fibers (green threads) with non-blocking I/O. Under `std.Io.Threaded`, tasks are scheduled across available concurrency units without requiring manual thread pool tuning.
+* **Zero Idle CPU**: Sockets waiting on requests or idle timeouts are managed directly by the kernel's event loop or sleep queues, consuming **strictly 0.0% CPU** when no requests are being processed.
 * **Zero-Allocation Parsing**: Headers and URL paths are sliced directly from the socket buffer into the routing engine without intermediate string copies.
 
 ---
@@ -53,7 +53,7 @@ Launch the test server in an independent terminal window:
 zig build bench -Doptimize=ReleaseFast
 
 # Expected console output:
-# info: Server listening on http://127.0.0.1:9090...
+# info: Server listening on http://127.0.0.1:7000...
 ```
 
 The benchmark server configures the following endpoints:
@@ -88,21 +88,21 @@ ApacheBench (`ab`) is bundled by default on macOS (`/usr/sbin/ab`) and available
 Measures connection setup and teardown overhead alongside HTTP processing:
 
 ```bash
-ab -c 20 -n 2000 http://127.0.0.1:9090/ping
+ab -c 20 -n 2000 http://127.0.0.1:7000/ping
 ```
 
 #### Scenario B: High-Throughput Keep-Alive (`/ping`)
 Measures pure HTTP parsing and response generation with connection reuse:
 
 ```bash
-ab -k -c 50 -n 10000 http://127.0.0.1:9090/ping
+ab -k -c 50 -n 10000 http://127.0.0.1:7000/ping
 ```
 
 #### Scenario C: Dynamic Go 1.22+ Parameter Routing (`/users/{id}`)
 Measures pattern matching and zero-copy path parameter extraction:
 
 ```bash
-ab -k -c 50 -n 10000 http://127.0.0.1:9090/users/42
+ab -k -c 50 -n 10000 http://127.0.0.1:7000/users/42
 ```
 
 #### Scenario D: POST Endpoint with Request Body
@@ -113,7 +113,7 @@ Measures streamed body reading and JSON response generation:
 echo -n '{"name":"lighting","role":"benchmark"}' > /tmp/payload.json
 
 # 2. Run POST benchmark
-ab -k -c 50 -n 10000 -p /tmp/payload.json -T "application/json" http://127.0.0.1:9090/users
+ab -k -c 50 -n 10000 -p /tmp/payload.json -T "application/json" http://127.0.0.1:7000/users
 
 # 3. Clean up
 rm -f /tmp/payload.json
@@ -123,7 +123,7 @@ rm -f /tmp/payload.json
 Measures recursive prefix tree traversal and greedy path capturing:
 
 ```bash
-ab -k -c 50 -n 10000 http://127.0.0.1:9090/files/docs/2026/q3/quarterly_report.pdf
+ab -k -c 50 -n 10000 http://127.0.0.1:7000/files/docs/2026/q3/quarterly_report.pdf
 ```
 
 ---
@@ -134,7 +134,7 @@ When `ab` finishes, examine the following key performance indicators:
 
 ```text
 Server Hostname:        127.0.0.1
-Server Port:            9090
+Server Port:            7000
 
 Document Path:          /users/42
 Concurrency Level:      50
@@ -171,7 +171,7 @@ Percentage of the requests served within a certain time (ms)
 
 ## 6. Workstation Benchmark Results
 
-The following measurements were captured on an Apple Silicon M-series workstation running macOS with 64 worker threads in `ReleaseFast` mode:
+The following measurements were captured on an Apple Silicon M-series workstation running macOS in `ReleaseFast` mode:
 
 | Benchmark Route | Request Type | Concurrency (`-c`) | Total Requests (`-n`) | Throughput (QPS) | Latency (Mean per Req) | Failed Requests |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -189,11 +189,11 @@ If benchmarking from multiple CPU client cores with tools such as `wrk` or `bomb
 ### `wrk`
 ```bash
 # 4 client threads, 50 concurrent connections, 10 second duration
-wrk -t4 -c50 -d10s -H "Connection: keep-alive" http://127.0.0.1:9090/users/42
+wrk -t4 -c50 -d10s -H "Connection: keep-alive" http://127.0.0.1:7000/users/42
 ```
 
 ### `bombardier`
 ```bash
 # Fast Go-based load generator
-bombardier -c 50 -n 10000 -k http://127.0.0.1:9090/ping
+bombardier -c 50 -n 10000 -k http://127.0.0.1:7000/ping
 ```
