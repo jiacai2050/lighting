@@ -68,7 +68,7 @@ pub const URL = struct {
         return null;
     }
 
-    /// URL unescape percent-encoded string and '+' to spaces
+    /// URL unescape percent-encoded string per RFC 3986 (leaves '+' literal)
     pub fn unescape(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
         var out = std.ArrayListUnmanaged(u8).empty;
         errdefer out.deinit(allocator);
@@ -82,10 +82,6 @@ pub const URL = struct {
                     i += 3;
                     continue;
                 } else |_| {}
-            } else if (s[i] == '+') {
-                try out.append(allocator, ' ');
-                i += 1;
-                continue;
             }
             try out.append(allocator, s[i]);
             i += 1;
@@ -189,7 +185,7 @@ test "URL parse and queryParam" {
 
     const unescaped = try URL.unescape(allocator, "hello+world%21%20%2F");
     defer allocator.free(unescaped);
-    try std.testing.expectEqualStrings("hello world! /", unescaped);
+    try std.testing.expectEqualStrings("hello+world! /", unescaped);
 }
 
 test "URL parse absolute-form targets" {

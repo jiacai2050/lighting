@@ -113,6 +113,8 @@ pub fn main(init: std.process.Init) !void {
 
 * **[ws](examples/ws)**: Real-time WebSocket echo & chat server demonstrating RFC 6455 upgrades (`lighting.extra.ws.upgrade`), full-duplex text/binary messaging, automatic Ping/Pong handling, and an embedded dark-mode browser client.
 
+* **[fs](examples/fs)**: Static file server demonstrating RFC 9110 Range partial content (for audio/video seeking and download resumption), RFC 9111 ETag 304 conditional caching, path traversal defense, and dynamic directory browsing with an adaptive dark mode UI.
+
 ---
 
 ## Benchmarks

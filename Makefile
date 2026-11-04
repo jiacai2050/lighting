@@ -1,4 +1,4 @@
-.PHONY: help build test fmt fmt-check bench run-hello run-todo run-ws clean
+.PHONY: help build test fmt fmt-check bench run-hello run-todo run-ws run-fs clean
 
 .DEFAULT_GOAL := help
 
@@ -32,5 +32,8 @@ run-todo: ## Run the todo SPA & SQLite example server
 run-ws: ## Run the WebSocket chat & echo example server
 	cd examples/ws && zig build run
 
+run-fs: ## Run the static file server example
+	cd examples/fs && zig build run
+
 clean: ## Clean build artifacts and temporary cache
-	rm -rf zig-out .zig-cache examples/hello/zig-out examples/hello/.zig-cache examples/todo/zig-out examples/todo/.zig-cache examples/ws/zig-out examples/ws/.zig-cache *.db *.db-journal
+	rm -rf zig-out .zig-cache examples/hello/zig-out examples/hello/.zig-cache examples/todo/zig-out examples/todo/.zig-cache examples/ws/zig-out examples/ws/.zig-cache examples/fs/zig-out examples/fs/.zig-cache *.db *.db-journal

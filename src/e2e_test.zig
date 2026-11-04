@@ -2786,3 +2786,475 @@ test "e2e: extra.ws invalid UTF-8 text message rejection" {
     };
     try std.testing.expectEqual(@as(usize, 0), read_res.data_len);
 }
+
+test "e2e extra.fs: FileServer serving, caching, ranges, traversal protection, and directory listing" {
+    const allocator = std.testing.allocator;
+    const io = getTestIo();
+
+    var fs = http.extra.fs.FileServer.init(allocator, .{
+        .root_dir = "src",
+        .auto_index = true,
+    });
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handle("/", fs.handler());
+
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    const listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var server = http.Server.init(allocator, io, .{
+        .handler = mux.handler(),
+    });
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
+    defer {
+        server.shutdown();
+        server_thread.join();
+    }
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+
+    // 1. Full GET for regular file
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /root.zig HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [4096]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK\r\n"));
+        try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Type: text/plain; charset=utf-8\r\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp, "Accept-Ranges: bytes\r\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp, "ETag: W/\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp, "Last-Modified: ") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp, "const std = @import(\"std\");") != null);
+    }
+
+    // 2. HEAD request: headers present, no body
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "HEAD /root.zig HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [4096]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK\r\n"));
+        try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Length: ") != null);
+        const header_end = std.mem.indexOf(u8, resp, "\r\n\r\n").?;
+        try std.testing.expectEqual(resp.len, header_end + 4);
+    }
+
+    // 3. Conditional GET with If-None-Match (304 Not Modified)
+    {
+        // First get ETag
+        var client1 = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client1.close(io);
+
+        const req1 = "HEAD /root.zig HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec1 = [1][]const u8{req1};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client1.socket.handle, .data = &vec1 } })).net_write;
+
+        var buf1: [2048]u8 = undefined;
+        var total1: usize = 0;
+        while (total1 < buf1.len) {
+            var r_vec = [1][]u8{buf1[total1..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client1.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total1 += n;
+        }
+
+        const resp1 = buf1[0..total1];
+        const etag_marker = "ETag: ";
+        const etag_start = std.mem.indexOf(u8, resp1, etag_marker).? + etag_marker.len;
+        const etag_end = std.mem.indexOfPos(u8, resp1, etag_start, "\r\n").?;
+        const etag_val = resp1[etag_start..etag_end];
+
+        // Request with If-None-Match
+        var client2 = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client2.close(io);
+
+        var req2_buf: [512]u8 = undefined;
+        const req2 = try std.fmt.bufPrint(&req2_buf, "GET /root.zig HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: {s}\r\nConnection: close\r\n\r\n", .{etag_val});
+        var vec2 = [1][]const u8{req2};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client2.socket.handle, .data = &vec2 } })).net_write;
+
+        var buf2: [2048]u8 = undefined;
+        var total2: usize = 0;
+        while (total2 < buf2.len) {
+            var r_vec = [1][]u8{buf2[total2..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client2.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total2 += n;
+        }
+
+        const resp2 = buf2[0..total2];
+        try std.testing.expect(std.mem.startsWith(u8, resp2, "HTTP/1.1 304 Not Modified\r\n"));
+        const header_end = std.mem.indexOf(u8, resp2, "\r\n\r\n").?;
+        try std.testing.expectEqual(resp2.len, header_end + 4);
+    }
+
+    // 4. Range request: bytes=0-10 -> 206 Partial Content
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /root.zig HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-10\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [2048]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 206 Partial Content\r\n"));
+        try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Range: bytes 0-10/") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Length: 11\r\n") != null);
+        const header_end = std.mem.indexOf(u8, resp, "\r\n\r\n").?;
+        const body = resp[header_end + 4 ..];
+        try std.testing.expectEqualStrings("const std =", body);
+    }
+
+    // 5. Unsatisfiable Range request -> 416
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /root.zig HTTP/1.1\r\nHost: localhost\r\nRange: bytes=9999999-\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [1024]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 416 Range Not Satisfiable\r\n"));
+        try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Range: bytes */") != null);
+    }
+
+    // 6. Path traversal attempt -> 403 Forbidden
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /../build.zig HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [1024]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 403 Forbidden\r\n"));
+    }
+
+    // 7. Not Found -> 404
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /nonexistent_file_xyz.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [1024]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 404 Not Found\r\n"));
+    }
+
+    // 8. Method Not Allowed (POST) -> 405
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "POST /root.zig HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [1024]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 405 Method Not Allowed\r\n"));
+        try std.testing.expect(std.mem.indexOf(u8, resp, "Allow: GET, HEAD\r\n") != null);
+    }
+
+    // 9. Directory listing -> 200 OK HTML
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [8192]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK\r\n"));
+        try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Type: text/html; charset=utf-8\r\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp, "Index of /") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp, "root.zig") != null);
+    }
+
+    // 10. Percent-encoded traversal: /%2e%2e/build.zig -> 403 Forbidden
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /%2e%2e/build.zig HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [1024]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 403 Forbidden\r\n"));
+    }
+
+    // 11. Syntactically invalid Range: bytes=500-400 (start > end) MUST be ignored -> 200 OK
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /root.zig HTTP/1.1\r\nHost: localhost\r\nRange: bytes=500-400\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [4096]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK\r\n"));
+    }
+
+    // 12. If-None-Match list form: "dummy", <matching_etag> -> 304 Not Modified
+    {
+        // First get ETag
+        var client1 = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client1.close(io);
+
+        const req1 = "HEAD /root.zig HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec1 = [1][]const u8{req1};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client1.socket.handle, .data = &vec1 } })).net_write;
+
+        var buf1: [2048]u8 = undefined;
+        var total1: usize = 0;
+        while (total1 < buf1.len) {
+            var r_vec = [1][]u8{buf1[total1..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client1.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total1 += n;
+        }
+
+        const resp1 = buf1[0..total1];
+        const etag_marker = "ETag: ";
+        const etag_start = std.mem.indexOf(u8, resp1, etag_marker).? + etag_marker.len;
+        const etag_end = std.mem.indexOfPos(u8, resp1, etag_start, "\r\n").?;
+        const etag_val = resp1[etag_start..etag_end];
+
+        var client2 = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client2.close(io);
+
+        var req2_buf: [512]u8 = undefined;
+        const req2 = try std.fmt.bufPrint(&req2_buf, "GET /root.zig HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"dummy\", {s}, \"other\"\r\nConnection: close\r\n\r\n", .{etag_val});
+        var vec2 = [1][]const u8{req2};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client2.socket.handle, .data = &vec2 } })).net_write;
+
+        var buf2: [2048]u8 = undefined;
+        var total2: usize = 0;
+        while (total2 < buf2.len) {
+            var r_vec = [1][]u8{buf2[total2..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client2.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total2 += n;
+        }
+
+        const resp2 = buf2[0..total2];
+        try std.testing.expect(std.mem.startsWith(u8, resp2, "HTTP/1.1 304 Not Modified\r\n"));
+    }
+
+    // 13. Directory redirect preserves query string: /extra?sort=name -> 301 Location: /extra/?sort=name
+    {
+        var client = try connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /extra?sort=name HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [1024]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 301 Moved Permanently\r\n"));
+        try std.testing.expect(std.mem.indexOf(u8, resp, "Location: /extra/?sort=name\r\n") != null);
+    }
+
+    // 14. strip_prefix boundary check: /static/root.zig vs /staticfoo (404)
+    {
+        var fs_prefix = http.extra.fs.FileServer.init(allocator, .{
+            .root_dir = "src",
+            .strip_prefix = "/static",
+            .auto_index = true,
+        });
+        var mux_prefix = http.ServeMux.init(allocator);
+        defer mux_prefix.deinit();
+
+        try mux_prefix.handle("/", fs_prefix.handler());
+
+        const addr_p = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+        const listener_p = try addr_p.listen(io, .{ .reuse_address = true });
+        const port_p = listener_p.socket.address.getPort();
+
+        var server_p = http.Server.init(allocator, io, .{
+            .handler = mux_prefix.handler(),
+        });
+        defer server_p.deinit();
+
+        const ServerThreadP = struct {
+            fn run(s: *http.Server, l: std.Io.net.Server) void {
+                s.serve(l) catch {};
+            }
+        };
+        const st_p = try std.Thread.spawn(.{}, ServerThreadP.run, .{ &server_p, listener_p });
+        defer {
+            server_p.shutdown();
+            st_p.join();
+        }
+
+        const connect_p = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port_p);
+
+        // A. /staticfoo must 404 (non-segment match)
+        {
+            var client = try connect_p.connect(io, .{ .mode = .stream });
+            defer client.close(io);
+
+            const req = "GET /staticfoo HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+            var vec = [1][]const u8{req};
+            _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+            var buf: [1024]u8 = undefined;
+            var total: usize = 0;
+            while (total < buf.len) {
+                var r_vec = [1][]u8{buf[total..]};
+                const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+                if (n == 0) break;
+                total += n;
+            }
+
+            const resp = buf[0..total];
+            try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 404 Not Found\r\n"));
+        }
+
+        // B. /static/root.zig must 200 OK
+        {
+            var client = try connect_p.connect(io, .{ .mode = .stream });
+            defer client.close(io);
+
+            const req = "GET /static/root.zig HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+            var vec = [1][]const u8{req};
+            _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+            var buf: [1024]u8 = undefined;
+            var total: usize = 0;
+            while (total < buf.len) {
+                var r_vec = [1][]u8{buf[total..]};
+                const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+                if (n == 0) break;
+                total += n;
+            }
+
+            const resp = buf[0..total];
+            try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK\r\n"));
+        }
+    }
+}

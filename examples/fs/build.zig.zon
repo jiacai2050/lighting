@@ -1,0 +1,17 @@
+.{
+    .name = .example_fs,
+    .version = "0.0.0",
+    .fingerprint = 0xaf4c5e19acd7a074,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .lighting = .{
+            .path = "../../",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "main.zig",
+        "README.md",
+    },
+}

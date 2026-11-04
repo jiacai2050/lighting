@@ -34,6 +34,7 @@ pub const Status = enum(u16) {
     payload_too_large = 413,
     uri_too_long = 414,
     unsupported_media_type = 415,
+    range_not_satisfiable = 416,
     expectation_failed = 417,
     header_fields_too_large = 431,
 
@@ -83,6 +84,7 @@ pub const Status = enum(u16) {
             .payload_too_large => "Payload Too Large",
             .uri_too_long => "URI Too Long",
             .unsupported_media_type => "Unsupported Media Type",
+            .range_not_satisfiable => "Range Not Satisfiable",
             .expectation_failed => "Expectation Failed",
             .header_fields_too_large => "Request Header Fields Too Large",
 
