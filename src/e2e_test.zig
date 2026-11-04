@@ -2459,3 +2459,330 @@ test "e2e: ResponseWriter.hijack fails with CannotFlushBuffer if status forbids 
     // Because handler errored with CannotFlushBuffer, server handles it as 500
     try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "500 Internal Server Error") != null);
 }
+
+test "e2e: extra.ws upgrade, echo text, ping-pong, and close" {
+    const allocator = std.testing.allocator;
+    const io = getTestIo();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("GET /ws-echo", struct {
+        fn handle(w: *http.ResponseWriter, req: *http.Request) anyerror!void {
+            var conn = try http.extra.ws.upgrade(w, req, .{});
+            defer conn.close();
+
+            while (try conn.readMessage(req.arena)) |msg| {
+                switch (msg.type) {
+                    .text => {
+                        var out_buf: [128]u8 = undefined;
+                        const echo = try std.fmt.bufPrint(&out_buf, "echo: {s}", .{msg.payload});
+                        try conn.writeText(echo);
+                    },
+                    .binary => try conn.writeBinary(msg.payload),
+                    .close => break,
+                }
+            }
+        }
+    }.handle);
+
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    const listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var server = http.Server.init(allocator, io, .{
+        .handler = mux.handler(),
+    });
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
+    defer {
+        server.shutdown();
+        server_thread.join();
+    }
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    // 1. Send WebSocket handshake request
+    const handshake_req =
+        "GET /ws-echo HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+        "Sec-WebSocket-Version: 13\r\n\r\n";
+    var vec = [1][]const u8{handshake_req};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+    // 2. Read 101 Switching Protocols response
+    var handshake_buf: [512]u8 = undefined;
+    var total_hs: usize = 0;
+    while (total_hs < handshake_buf.len and std.mem.indexOf(u8, handshake_buf[0..total_hs], "\r\n\r\n") == null) {
+        var r_vec = [1][]u8{handshake_buf[total_hs..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        total_hs += n;
+    }
+    const hs_resp = handshake_buf[0..total_hs];
+    try std.testing.expect(std.mem.indexOf(u8, hs_resp, "101 Switching Protocols") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hs_resp, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") != null);
+
+    // Helper to send a masked client frame
+    const ClientHelper = struct {
+        fn sendFrame(t_io: std.Io, h: std.Io.net.Socket.Handle, opcode: u4, data: []const u8) !void {
+            const mask_key = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+            var hdr: [6]u8 = undefined;
+            hdr[0] = 0x80 | @as(u8, opcode); // FIN + opcode
+            hdr[1] = 0x80 | @as(u8, @intCast(data.len)); // MASK bit + len
+            @memcpy(hdr[2..6], &mask_key);
+
+            var masked: [128]u8 = undefined;
+            @memcpy(masked[0..data.len], data);
+            for (masked[0..data.len], 0..) |*b, i| {
+                b.* ^= mask_key[i % 4];
+            }
+            var v = [2][]const u8{ &hdr, masked[0..data.len] };
+            _ = try (try t_io.operate(.{ .net_write = .{ .socket_handle = h, .data = &v } })).net_write;
+        }
+
+        fn readFrame(t_io: std.Io, h: std.Io.net.Socket.Handle, dest: []u8) !struct { opcode: u4, len: usize } {
+            var hdr: [2]u8 = undefined;
+            var tot: usize = 0;
+            while (tot < 2) {
+                var r = [1][]u8{hdr[tot..]};
+                const n = (try (try t_io.operate(.{ .net_read = .{ .socket_handle = h, .data = &r } })).net_read).data_len;
+                if (n == 0) return error.ConnectionClosed;
+                tot += n;
+            }
+            const op = @as(u4, @truncate(hdr[0] & 0x0F));
+            const p_len = @as(usize, @intCast(hdr[1] & 0x7F));
+            var p_tot: usize = 0;
+            while (p_tot < p_len) {
+                var r = [1][]u8{dest[p_tot..p_len]};
+                const n = (try (try t_io.operate(.{ .net_read = .{ .socket_handle = h, .data = &r } })).net_read).data_len;
+                if (n == 0) return error.ConnectionClosed;
+                p_tot += n;
+            }
+            return .{ .opcode = op, .len = p_len };
+        }
+    };
+
+    // 3. Send Text frame: "hello"
+    try ClientHelper.sendFrame(io, client.socket.handle, 0x1, "hello");
+
+    // 4. Read server echo Text frame
+    var text_payload: [64]u8 = undefined;
+    const text_res = try ClientHelper.readFrame(io, client.socket.handle, &text_payload);
+    try std.testing.expectEqual(@as(u4, 0x1), text_res.opcode);
+    try std.testing.expectEqualStrings("echo: hello", text_payload[0..text_res.len]);
+
+    // 5. Send Ping frame: "heartbeat"
+    try ClientHelper.sendFrame(io, client.socket.handle, 0x9, "heartbeat");
+
+    // 6. Server must automatically respond with Pong frame
+    var pong_payload: [64]u8 = undefined;
+    const pong_res = try ClientHelper.readFrame(io, client.socket.handle, &pong_payload);
+    try std.testing.expectEqual(@as(u4, 0xA), pong_res.opcode); // 0xA is Pong
+    try std.testing.expectEqualStrings("heartbeat", pong_payload[0..pong_res.len]);
+
+    // 7. Send Close frame
+    try ClientHelper.sendFrame(io, client.socket.handle, 0x8, "");
+
+    // 8. Server echoes back Close frame
+    var close_payload: [64]u8 = undefined;
+    const close_res = try ClientHelper.readFrame(io, client.socket.handle, &close_payload);
+    try std.testing.expectEqual(@as(u4, 0x8), close_res.opcode);
+}
+
+test "e2e: extra.ws fragmented message cumulative limit" {
+    const allocator = std.testing.allocator;
+    const io = getTestIo();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("GET /ws-limited", struct {
+        fn handle(w: *http.ResponseWriter, req: *http.Request) anyerror!void {
+            var conn = try http.extra.ws.upgrade(w, req, .{ .max_message_size = 20 });
+            defer conn.close();
+
+            // When cumulative message size exceeds 20 bytes, readMessage fails with error.MessageTooLarge
+            const msg = try conn.readMessage(req.arena);
+            _ = msg;
+        }
+    }.handle);
+
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    const listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var server = http.Server.init(allocator, io, .{
+        .handler = mux.handler(),
+    });
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
+    defer {
+        server.shutdown();
+        server_thread.join();
+    }
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    // 1. Handshake
+    const handshake_req =
+        "GET /ws-limited HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+        "Sec-WebSocket-Version: 13\r\n\r\n";
+    var vec = [1][]const u8{handshake_req};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+    var handshake_buf: [256]u8 = undefined;
+    var total_hs: usize = 0;
+    while (total_hs < handshake_buf.len and std.mem.indexOf(u8, handshake_buf[0..total_hs], "\r\n\r\n") == null) {
+        var r_vec = [1][]u8{handshake_buf[total_hs..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        total_hs += n;
+    }
+
+    // 2. Helper to send client frame with custom FIN bit
+    const FrameHelper = struct {
+        fn sendFrameFin(t_io: std.Io, h: std.Io.net.Socket.Handle, opcode: u4, data: []const u8, fin: bool) !void {
+            const mask_key = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+            var hdr: [6]u8 = undefined;
+            hdr[0] = (if (fin) @as(u8, 0x80) else 0) | @as(u8, opcode);
+            hdr[1] = 0x80 | @as(u8, @intCast(data.len));
+            @memcpy(hdr[2..6], &mask_key);
+
+            var masked: [128]u8 = undefined;
+            @memcpy(masked[0..data.len], data);
+            for (masked[0..data.len], 0..) |*b, i| {
+                b.* ^= mask_key[i % 4];
+            }
+            var v = [2][]const u8{ &hdr, masked[0..data.len] };
+            _ = try (try t_io.operate(.{ .net_write = .{ .socket_handle = h, .data = &v } })).net_write;
+        }
+    };
+
+    // 3. Send fragment 1: 12 bytes (text, fin = false)
+    try FrameHelper.sendFrameFin(io, client.socket.handle, 0x1, "123456789012", false);
+
+    // 4. Send fragment 2: 12 bytes (continuation, fin = true). Total 24 > max_message_size 20!
+    try FrameHelper.sendFrameFin(io, client.socket.handle, 0x0, "123456789012", true);
+
+    // 5. Server will error with MessageTooLarge and terminate socket (EOF or RST)
+    var read_buf: [64]u8 = undefined;
+    var r_vec = [1][]u8{&read_buf};
+    const res = try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } });
+    const read_res = res.net_read catch |err| switch (err) {
+        error.ConnectionResetByPeer => return,
+        else => return err,
+    };
+    try std.testing.expectEqual(@as(usize, 0), read_res.data_len);
+}
+
+test "e2e: extra.ws invalid UTF-8 text message rejection" {
+    const allocator = std.testing.allocator;
+    const io = getTestIo();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("GET /ws-utf8", struct {
+        fn handle(w: *http.ResponseWriter, req: *http.Request) anyerror!void {
+            var conn = try http.extra.ws.upgrade(w, req, .{});
+            defer conn.close();
+
+            // When invalid UTF-8 text payload is received, readMessage fails with error.InvalidUtf8
+            const msg = try conn.readMessage(req.arena);
+            _ = msg;
+        }
+    }.handle);
+
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    const listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var server = http.Server.init(allocator, io, .{
+        .handler = mux.handler(),
+    });
+    defer server.deinit();
+
+    const ServerThread = struct {
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
+    defer {
+        server.shutdown();
+        server_thread.join();
+    }
+
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    // 1. Handshake
+    const handshake_req =
+        "GET /ws-utf8 HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+        "Sec-WebSocket-Version: 13\r\n\r\n";
+    var vec = [1][]const u8{handshake_req};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+    var handshake_buf: [256]u8 = undefined;
+    var total_hs: usize = 0;
+    while (total_hs < handshake_buf.len and std.mem.indexOf(u8, handshake_buf[0..total_hs], "\r\n\r\n") == null) {
+        var r_vec = [1][]u8{handshake_buf[total_hs..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        total_hs += n;
+    }
+
+    // 2. Send invalid UTF-8 bytes in a text frame (opcode 0x1)
+    const invalid_utf8 = [_]u8{ 0xFF, 0xFE, 0xFD };
+    const mask_key = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    var hdr: [6]u8 = undefined;
+    hdr[0] = 0x81; // FIN + text
+    hdr[1] = 0x80 | @as(u8, invalid_utf8.len);
+    @memcpy(hdr[2..6], &mask_key);
+
+    var masked: [3]u8 = undefined;
+    for (invalid_utf8, 0..) |b, i| {
+        masked[i] = b ^ mask_key[i % 4];
+    }
+    var v = [2][]const u8{ &hdr, &masked };
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &v } })).net_write;
+
+    // 3. Server should detect InvalidUtf8 and close the connection
+    var read_buf: [64]u8 = undefined;
+    var r_vec = [1][]u8{&read_buf};
+    const res = try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } });
+    const read_res = res.net_read catch |err| switch (err) {
+        error.ConnectionResetByPeer => return,
+        else => return err,
+    };
+    try std.testing.expectEqual(@as(usize, 0), read_res.data_len);
+}

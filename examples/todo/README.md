@@ -6,7 +6,7 @@ A full-stack Todo application showcasing state injection, SQLite persistence, RE
 
 - **State Injection**: `http.Handler.bind(&app, App.method)` to inject database into handlers.
 - **SQLite**: Persistence via [`zig-sqlite`](https://github.com/nDimensional/zig-sqlite).
-- **Embedded SPA**: Dark-mode frontend embedded via `@embedFile("index.html")`.
+- **Embedded SPA**: Frontend embedded via `@embedFile("index.html")` with adaptive dark/light mode.
 - **Configurable**: `PORT` (default: 7000) and `DB_PATH` (default: `/tmp/lighting-todo.db`).
 
 ## Quick Start

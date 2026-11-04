@@ -23,6 +23,10 @@ pub const ResponseWriter = struct {
     buffer_len: usize = 0,
     chunked_mode: bool = false,
 
+    // Lifecycle hook triggered immediately when socket is hijacked
+    on_hijack: ?*const fn (*anyopaque) void = null,
+    on_hijack_ctx: ?*anyopaque = null,
+
     pub fn init(
         stream: std.Io.net.Stream,
         io: std.Io,
@@ -222,8 +226,8 @@ pub const ResponseWriter = struct {
     /// without a terminal chunk (`0\r\n\r\n`). Handlers should set `Content-Length` first, or hijack before
     /// writing, for clean protocol framing.
     ///
-    /// Lifecycle: After the handler returns, the server unregisters the connection from shutdown
-    /// tracking; until then `Server.shutdown()` may still interrupt the session.
+    /// Lifecycle: On hijack the server unregisters the connection from shutdown
+    /// tracking; `Server.shutdown()` will no longer close or reset the socket directly.
     ///
     /// NOTE: Any trailing request bytes already read ahead by the server's connection buffer
     /// (e.g. client early data or pipelined frames sent prior to the upgrade response) are not
@@ -236,6 +240,12 @@ pub const ResponseWriter = struct {
         if (self.buffer_len > 0) {
             try self.flush();
             if (self.buffer_len > 0) return error.CannotFlushBuffer;
+        }
+        if (self.on_hijack) |cb| {
+            if (self.on_hijack_ctx) |ctx| {
+                cb(ctx);
+            }
+            self.on_hijack = null;
         }
         self.hijacked = true;
         return self.stream;
@@ -251,7 +261,13 @@ pub const ResponseWriter = struct {
         try io_util.writeSocketAllTimeout(self.stream, self.io, &vecs, self.write_timeout_ns);
     }
 
-    fn flushHeaders(self: *ResponseWriter) !void {
+    /// Flushes the HTTP response status line and headers out to the wire immediately.
+    ///
+    /// NOTE: This method writes raw headers without computing Content-Length or transitioning
+    /// to chunked transfer encoding. It is intended for status codes that forbid bodies
+    /// (e.g. 101 Switching Protocols, 204 No Content) or custom upgrade handshakes before hijack.
+    /// For responses with body data, use write()/writeAll() or flush().
+    pub fn flushHeaders(self: *ResponseWriter) !void {
         if (self.header_written) return;
 
         // RFC 9110 Section 6.6.1: Date header MUST be sent by origin server

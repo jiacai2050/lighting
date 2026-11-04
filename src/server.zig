@@ -290,6 +290,22 @@ pub const Server = struct {
             );
             res.setWriteTimeout(self.options.write_timeout_ns);
 
+            const HijackContext = struct {
+                server: *Server,
+                node: *ConnNode,
+
+                fn unregister(ctx: *anyopaque) void {
+                    const self_ctx: *@This() = @ptrCast(@alignCast(ctx));
+                    self_ctx.server.unregisterConnNode(self_ctx.node);
+                }
+            };
+            var hijack_ctx = HijackContext{
+                .server = self,
+                .node = &conn_node,
+            };
+            res.on_hijack = HijackContext.unregister;
+            res.on_hijack_ctx = &hijack_ctx;
+
             // Invoke Handler (Catch error to avoid crash and isolate 500)
             self.options.handler.serveHTTP(&res, &req) catch |err| {
                 if (@errorReturnTrace()) |trace| {
@@ -319,11 +335,10 @@ pub const Server = struct {
                 }
             };
 
-            // If connection was hijacked, transfer socket ownership to handler,
-            // unregister from active server connections, and exit immediately
+            // If connection was hijacked, socket ownership was transferred and
+            // connection was already unregistered on hijack; exit immediately
             if (res.hijacked) {
                 close_stream = false;
-                self.unregisterConnNode(&conn_node);
                 return;
             }
 

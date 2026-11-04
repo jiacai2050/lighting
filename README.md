@@ -109,7 +109,9 @@ pub fn main(init: std.process.Init) !void {
 
 * **[hello](examples/hello)**: Minimal starter demonstrating Juicy Main, Go 1.22+ routing with path parameters (`/hello/{name}`), request logging, and `PORT` configuration.
 
-* **[todo](examples/todo)**: Full-stack Todo app showcasing state injection (`http.Handler.bind`), [`zig-sqlite`](https://github.com/nDimensional/zig-sqlite) persistence, REST API, and an embedded dark-mode SPA frontend (`index.html`).
+* **[todo](examples/todo)**: Full-stack Todo app showcasing state injection (`http.Handler.bind`), [`zig-sqlite`](https://github.com/nDimensional/zig-sqlite) persistence, REST API, and an embedded dark-mode SPA frontend.
+
+* **[ws](examples/ws)**: Real-time WebSocket echo & chat server demonstrating RFC 6455 upgrades (`lighting.extra.ws.upgrade`), full-duplex text/binary messaging, automatic Ping/Pong handling, and an embedded dark-mode browser client.
 
 ---
 

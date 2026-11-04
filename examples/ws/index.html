@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lighting WebSocket Demo</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --border: #e2e8f0;
+            --text: #0f172a;
+            --text-muted: #64748b;
+            --primary: #0284c7;
+            --primary-hover: #0369a1;
+            --primary-fg: #ffffff;
+            --input-bg: #f8fafc;
+            --chip-bg: #f1f5f9;
+            --chip-hover: #e2e8f0;
+            --btn-secondary-bg: #e2e8f0;
+            --btn-secondary-fg: #0f172a;
+            --btn-secondary-hover: #cbd5e1;
+            --badge-bg: #f1f5f9;
+            --log-bg: #ffffff;
+            --green: #16a34a;
+            --yellow: #ca8a04;
+            --red: #ef4444;
+            --tag-sent: #0284c7;
+            --tag-recv: #16a34a;
+            --tag-close: #d97706;
+            --tag-info: #64748b;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) {
+                color-scheme: dark;
+                --bg: #0f172a;
+                --card-bg: #1e293b;
+                --border: #334155;
+                --text: #f8fafc;
+                --text-muted: #94a3b8;
+                --primary: #38bdf8;
+                --primary-hover: #0284c7;
+                --primary-fg: #0f172a;
+                --input-bg: #0f172a;
+                --chip-bg: #334155;
+                --chip-hover: #475569;
+                --btn-secondary-bg: #334155;
+                --btn-secondary-fg: #f8fafc;
+                --btn-secondary-hover: #475569;
+                --badge-bg: #334155;
+                --log-bg: #090d16;
+                --green: #22c55e;
+                --yellow: #eab308;
+                --red: #ef4444;
+                --tag-sent: #38bdf8;
+                --tag-recv: #22c55e;
+                --tag-close: #eab308;
+                --tag-info: #94a3b8;
+            }
+        }
+
+        :root[data-theme="dark"] {
+            color-scheme: dark;
+            --bg: #0f172a;
+            --card-bg: #1e293b;
+            --border: #334155;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --primary: #38bdf8;
+            --primary-hover: #0284c7;
+            --primary-fg: #0f172a;
+            --input-bg: #0f172a;
+            --chip-bg: #334155;
+            --chip-hover: #475569;
+            --btn-secondary-bg: #334155;
+            --btn-secondary-fg: #f8fafc;
+            --btn-secondary-hover: #475569;
+            --badge-bg: #334155;
+            --log-bg: #090d16;
+            --green: #22c55e;
+            --yellow: #eab308;
+            --red: #ef4444;
+            --tag-sent: #38bdf8;
+            --tag-recv: #22c55e;
+            --tag-close: #eab308;
+            --tag-info: #94a3b8;
+        }
+
+        :root[data-theme="light"] {
+            color-scheme: light;
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --border: #e2e8f0;
+            --text: #0f172a;
+            --text-muted: #64748b;
+            --primary: #0284c7;
+            --primary-hover: #0369a1;
+            --primary-fg: #ffffff;
+            --input-bg: #f8fafc;
+            --chip-bg: #f1f5f9;
+            --chip-hover: #e2e8f0;
+            --btn-secondary-bg: #e2e8f0;
+            --btn-secondary-fg: #0f172a;
+            --btn-secondary-hover: #cbd5e1;
+            --badge-bg: #f1f5f9;
+            --log-bg: #ffffff;
+            --green: #16a34a;
+            --yellow: #ca8a04;
+            --red: #ef4444;
+            --tag-sent: #0284c7;
+            --tag-recv: #16a34a;
+            --tag-close: #d97706;
+            --tag-info: #64748b;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem 1rem;
+            transition: background-color 0.2s ease, color 0.2s ease;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .theme-toggle-btn {
+            background: var(--badge-bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            padding: 0.35rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .theme-toggle-btn:hover {
+            background: var(--btn-secondary-hover);
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.35rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            background: var(--badge-bg);
+            border: 1px solid var(--border);
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--red);
+        }
+
+        .connected .dot { background-color: var(--green); }
+        .connecting .dot { background-color: var(--yellow); }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.25rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+        }
+
+        .control-row {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            min-width: 200px;
+            background: var(--input-bg);
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            padding: 0.65rem 0.85rem;
+            color: var(--text);
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.15s ease;
+        }
+
+        input[type="text"]:focus {
+            border-color: var(--primary);
+        }
+
+        button {
+            background: var(--primary);
+            color: var(--primary-fg);
+            border: none;
+            border-radius: 0.5rem;
+            padding: 0.65rem 1.25rem;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.15s ease;
+        }
+
+        button:hover:not(:disabled) {
+            background: var(--primary-hover);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        button.secondary {
+            background: var(--btn-secondary-bg);
+            color: var(--btn-secondary-fg);
+            border: 1px solid var(--border);
+        }
+
+        button.secondary:hover:not(:disabled) {
+            background: var(--btn-secondary-hover);
+        }
+
+        button.danger {
+            background: var(--red);
+            color: #ffffff;
+        }
+
+        button.danger:hover:not(:disabled) {
+            filter: brightness(0.9);
+        }
+
+        .quick-chips {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            align-items: center;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .chip {
+            background: var(--chip-bg);
+            color: var(--text);
+            padding: 0.25rem 0.6rem;
+            border-radius: 0.375rem;
+            cursor: pointer;
+            font-size: 0.8rem;
+            border: 1px solid var(--border);
+            transition: all 0.15s ease;
+        }
+
+        .chip:hover {
+            border-color: var(--primary);
+            background: var(--chip-hover);
+        }
+
+        .log-box {
+            background: var(--log-bg);
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            height: 380px;
+            overflow-y: auto;
+            padding: 1rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.85rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.05);
+        }
+
+        .log-line {
+            display: flex;
+            gap: 0.5rem;
+            line-height: 1.4;
+            word-break: break-all;
+        }
+
+        .time { color: var(--text-muted); }
+        .tag { font-weight: 600; }
+        .tag-sent { color: var(--tag-sent); }
+        .tag-recv { color: var(--tag-recv); }
+        .tag-info { color: var(--tag-info); }
+        .tag-close { color: var(--tag-close); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⚡️ Lighting WebSocket Demo</h1>
+            <div class="header-actions">
+                <button id="theme-btn" class="theme-toggle-btn" onclick="cycleTheme()" title="Toggle Color Theme">🌓 Auto</button>
+                <div id="status" class="status-badge">
+                    <span class="dot"></span>
+                    <span id="status-text">Disconnected</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="card">
+            <div class="control-row">
+                <button id="btn-connect" class="secondary" onclick="toggleConnect()">Connect</button>
+                <button id="btn-ping" class="secondary" onclick="sendPing()" disabled>Send Ping</button>
+                <button class="secondary" style="margin-left: auto;" onclick="clearLog()">Clear Log</button>
+            </div>
+
+            <form class="control-row" onsubmit="sendMessage(event)">
+                <input type="text" id="msg-input" placeholder="Type a message to send..." disabled autocomplete="off">
+                <button type="submit" id="btn-send" disabled>Send</button>
+            </form>
+
+            <div class="quick-chips">
+                <span>Quick inputs:</span>
+                <span class="chip" onclick="quickSend('Hello from browser!')">Hello from browser!</span>
+                <span class="chip" onclick="quickSend('Zig 0.17 structured concurrency')">Zig 0.17 structured concurrency</span>
+                <span class="chip" onclick="quickSend('RFC 6455 framing & XOR masking')">RFC 6455 framing</span>
+            </div>
+        </div>
+
+        <div class="log-box" id="log-box"></div>
+    </div>
+
+    <script>
+        const THEME_KEY = 'lighting_ws_theme';
+        const themeBtn = document.getElementById('theme-btn');
+
+        function applyTheme(theme) {
+            const root = document.documentElement;
+            if (theme === 'dark') {
+                root.setAttribute('data-theme', 'dark');
+                themeBtn.innerText = '🌙 Dark';
+            } else if (theme === 'light') {
+                root.setAttribute('data-theme', 'light');
+                themeBtn.innerText = '☀️ Light';
+            } else {
+                root.removeAttribute('data-theme');
+                themeBtn.innerText = '🌓 Auto';
+            }
+        }
+
+        function cycleTheme() {
+            const current = localStorage.getItem(THEME_KEY) || 'auto';
+            const next = current === 'auto' ? 'dark' : (current === 'dark' ? 'light' : 'auto');
+            if (next === 'auto') {
+                localStorage.removeItem(THEME_KEY);
+            } else {
+                localStorage.setItem(THEME_KEY, next);
+            }
+            applyTheme(next);
+        }
+
+        // Initialize theme preference from localStorage
+        applyTheme(localStorage.getItem(THEME_KEY) || 'auto');
+
+        let ws = null;
+        const statusBadge = document.getElementById('status');
+        const statusText = document.getElementById('status-text');
+        const btnConnect = document.getElementById('btn-connect');
+        const btnPing = document.getElementById('btn-ping');
+        const btnSend = document.getElementById('btn-send');
+        const msgInput = document.getElementById('msg-input');
+        const logBox = document.getElementById('log-box');
+
+        function log(type, text) {
+            const now = new Date();
+            const timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+            const line = document.createElement('div');
+            line.className = 'log-line';
+
+            let tagClass = 'tag-info';
+            if (type === 'SENT') tagClass = 'tag-sent';
+            else if (type === 'RECV') tagClass = 'tag-recv';
+            else if (type === 'CLOSE') tagClass = 'tag-close';
+
+            line.innerHTML = `<span class="time">[${timeStr}]</span> <span class="tag ${tagClass}">[${type}]</span> <span>${escapeHtml(text)}</span>`;
+            logBox.appendChild(line);
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        }
+
+        function clearLog() {
+            logBox.innerHTML = '';
+        }
+
+        function updateUI(connected, connecting = false) {
+            statusBadge.className = 'status-badge' + (connected ? ' connected' : (connecting ? ' connecting' : ''));
+            statusText.innerText = connected ? 'Connected' : (connecting ? 'Connecting...' : 'Disconnected');
+            btnConnect.innerText = connected ? 'Disconnect' : 'Connect';
+            btnConnect.className = connected ? 'danger' : 'secondary';
+            btnPing.disabled = !connected;
+            btnSend.disabled = !connected;
+            msgInput.disabled = !connected;
+            if (connected) msgInput.focus();
+        }
+
+        function toggleConnect() {
+            if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+                ws.close(1000, "Normal Closure");
+                return;
+            }
+
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${location.host}/ws`;
+
+            updateUI(false, true);
+            log('INFO', `Connecting to ${wsUrl}...`);
+
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                updateUI(true);
+                log('INFO', 'WebSocket connection established (HTTP/1.1 101 Switching Protocols)');
+            };
+
+            ws.onmessage = (event) => {
+                log('RECV', event.data);
+            };
+
+            ws.onerror = (err) => {
+                log('INFO', 'WebSocket connection error');
+            };
+
+            ws.onclose = (event) => {
+                updateUI(false);
+                log('CLOSE', `Disconnected (Code: ${event.code}, Clean: ${event.wasClean})`);
+                ws = null;
+            };
+        }
+
+        function sendMessage(e) {
+            if (e) e.preventDefault();
+            const text = msgInput.value.trim();
+            if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+            ws.send(text);
+            log('SENT', text);
+            msgInput.value = '';
+        }
+
+        function quickSend(text) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert("Please connect to WebSocket first!");
+                return;
+            }
+            ws.send(text);
+            log('SENT', text);
+        }
+
+        function sendPing() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            // Modern browsers do not expose raw WS Ping frames via JS API,
+            // so we send a ping-like application message.
+            const pingText = `PING:${Date.now()}`;
+            ws.send(pingText);
+            log('SENT', pingText);
+        }
+
+        // Auto connect on page load
+        window.addEventListener('DOMContentLoaded', () => {
+            toggleConnect();
+        });
+    </script>
+</body>
+</html>

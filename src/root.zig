@@ -24,6 +24,8 @@ pub const ServerOptions = @import("server.zig").ServerOptions;
 pub const parseRequestHead = @import("proto/parser.zig").parseRequestHead;
 pub const BodyReader = @import("proto/chunk_reader.zig").BodyReader;
 
+pub const extra = @import("extra/root.zig");
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("proto/method.zig");
@@ -37,4 +39,5 @@ test {
     _ = @import("mux.zig");
     _ = @import("thread_pool.zig");
     _ = @import("server.zig");
+    _ = @import("extra/root.zig");
 }

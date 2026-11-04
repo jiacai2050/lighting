@@ -3,9 +3,62 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Lighting Todo SPA</title>
+  <title>Lighting Todo Demo</title>
   <style>
     :root {
+      color-scheme: light;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --card-hover: #f1f5f9;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --primary: #0284c7;
+      --primary-hover: #0369a1;
+      --primary-fg: #ffffff;
+      --border: #e2e8f0;
+      --input-bg: #f8fafc;
+      --item-bg: #f8fafc;
+      --item-hover-border: #cbd5e1;
+      --badge-bg: #f1f5f9;
+      --badge-color: #0284c7;
+      --filter-active-bg: #e2e8f0;
+      --filter-active-color: #0284c7;
+      --delete-hover-bg: rgba(239, 68, 68, 0.1);
+      --danger: #ef4444;
+      --danger-hover: #dc2626;
+      --success: #16a34a;
+      --shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.08);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        color-scheme: dark;
+        --bg: #0f172a;
+        --card: #1e293b;
+        --card-hover: #26354a;
+        --text: #f8fafc;
+        --text-muted: #94a3b8;
+        --primary: #38bdf8;
+        --primary-hover: #0ea5e9;
+        --primary-fg: #0f172a;
+        --border: #334155;
+        --input-bg: #0f172a;
+        --item-bg: #0f172a;
+        --item-hover-border: #475569;
+        --badge-bg: #334155;
+        --badge-color: #38bdf8;
+        --filter-active-bg: #334155;
+        --filter-active-color: #38bdf8;
+        --delete-hover-bg: rgba(239, 68, 68, 0.15);
+        --danger: #ef4444;
+        --danger-hover: #dc2626;
+        --success: #10b981;
+        --shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+      }
+    }
+
+    :root[data-theme="dark"] {
+      color-scheme: dark;
       --bg: #0f172a;
       --card: #1e293b;
       --card-hover: #26354a;
@@ -13,11 +66,47 @@
       --text-muted: #94a3b8;
       --primary: #38bdf8;
       --primary-hover: #0ea5e9;
+      --primary-fg: #0f172a;
       --border: #334155;
+      --input-bg: #0f172a;
+      --item-bg: #0f172a;
+      --item-hover-border: #475569;
+      --badge-bg: #334155;
+      --badge-color: #38bdf8;
+      --filter-active-bg: #334155;
+      --filter-active-color: #38bdf8;
+      --delete-hover-bg: rgba(239, 68, 68, 0.15);
       --danger: #ef4444;
       --danger-hover: #dc2626;
       --success: #10b981;
+      --shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
     }
+
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --card-hover: #f1f5f9;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --primary: #0284c7;
+      --primary-hover: #0369a1;
+      --primary-fg: #ffffff;
+      --border: #e2e8f0;
+      --input-bg: #f8fafc;
+      --item-bg: #f8fafc;
+      --item-hover-border: #cbd5e1;
+      --badge-bg: #f1f5f9;
+      --badge-color: #0284c7;
+      --filter-active-bg: #e2e8f0;
+      --filter-active-color: #0284c7;
+      --delete-hover-bg: rgba(239, 68, 68, 0.1);
+      --danger: #ef4444;
+      --danger-hover: #dc2626;
+      --success: #16a34a;
+      --shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.08);
+    }
+
     * {
       box-sizing: border-box;
       margin: 0;
@@ -31,6 +120,7 @@
       justify-content: center;
       min-height: 100vh;
       padding: 40px 16px;
+      transition: background-color 0.2s ease, color 0.2s ease;
     }
     .app-container {
       width: 100%;
@@ -40,28 +130,49 @@
       gap: 20px;
     }
     header {
-      text-align: center;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .header-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
     }
     header h1 {
-      font-size: 2rem;
+      font-size: 1.85rem;
       font-weight: 700;
       display: flex;
       align-items: center;
-      justify-content: center;
       gap: 8px;
-      color: #fff;
+      color: var(--text);
     }
     header p {
       color: var(--text-muted);
       font-size: 0.9rem;
-      margin-top: 6px;
+    }
+    .theme-toggle-btn {
+      background: var(--badge-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 0.35rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .theme-toggle-btn:hover {
+      border-color: var(--primary);
     }
     .card {
       background-color: var(--card);
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: 24px;
-      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+      box-shadow: var(--shadow);
     }
     .todo-form {
       display: flex;
@@ -73,7 +184,7 @@
       padding: 12px 16px;
       border: 1px solid var(--border);
       border-radius: 8px;
-      background: #0f172a;
+      background: var(--input-bg);
       color: var(--text);
       font-size: 0.95rem;
       outline: none;
@@ -96,7 +207,7 @@
     }
     .btn-primary {
       background-color: var(--primary);
-      color: #0f172a;
+      color: var(--primary-fg);
     }
     .btn-primary:hover {
       background-color: var(--primary-hover);
@@ -127,8 +238,8 @@
       color: var(--text);
     }
     .filter-btn.active {
-      background: #334155;
-      color: var(--primary);
+      background: var(--filter-active-bg);
+      color: var(--filter-active-color);
       border-color: var(--border);
       font-weight: 600;
     }
@@ -143,13 +254,13 @@
       align-items: center;
       justify-content: space-between;
       padding: 12px 14px;
-      background: #0f172a;
+      background: var(--item-bg);
       border: 1px solid var(--border);
       border-radius: 8px;
       transition: all 0.2s;
     }
     .todo-item:hover {
-      border-color: #475569;
+      border-color: var(--item-hover-border);
     }
     .todo-content {
       display: flex;
@@ -208,7 +319,7 @@
     }
     .btn-delete:hover {
       color: var(--danger);
-      background: rgba(239, 68, 68, 0.1);
+      background: var(--delete-hover-bg);
     }
     .empty-state {
       text-align: center;
@@ -224,30 +335,37 @@
       justify-content: space-between;
       color: var(--text-muted);
       font-size: 0.85rem;
+      flex-wrap: wrap;
+      gap: 6px;
     }
     .badge {
-      background: #334155;
+      background: var(--badge-bg);
+      border: 1px solid var(--border);
       padding: 2px 8px;
       border-radius: 10px;
-      color: var(--primary);
+      color: var(--badge-color);
+      font-weight: 500;
     }
   </style>
 </head>
 <body>
   <div class="app-container">
     <header>
-      <h1>⚡️ Lighting Todo</h1>
+      <div class="header-bar">
+        <h1>⚡️ Lighting Todo</h1>
+        <button id="theme-btn" class="theme-toggle-btn" onclick="cycleTheme()" title="Toggle Color Theme">🌓 Auto</button>
+      </div>
       <p>Zig 0.17 HTTP Server + SQLite Single Page App</p>
     </header>
 
     <div class="card">
       <form class="todo-form" id="todo-form">
-        <input 
-          type="text" 
-          id="todo-input" 
-          class="todo-input" 
-          placeholder="What needs to be done?" 
-          autocomplete="off" 
+        <input
+          type="text"
+          id="todo-input"
+          class="todo-input"
+          placeholder="What needs to be done?"
+          autocomplete="off"
           required
         />
         <button type="submit" class="btn btn-primary">Add</button>
@@ -274,6 +392,37 @@
   </div>
 
   <script>
+    const THEME_KEY = 'lighting_todo_theme';
+    const themeBtn = document.getElementById('theme-btn');
+
+    function applyTheme(theme) {
+      const root = document.documentElement;
+      if (theme === 'dark') {
+        root.setAttribute('data-theme', 'dark');
+        themeBtn.innerText = '🌙 Dark';
+      } else if (theme === 'light') {
+        root.setAttribute('data-theme', 'light');
+        themeBtn.innerText = '☀️ Light';
+      } else {
+        root.removeAttribute('data-theme');
+        themeBtn.innerText = '🌓 Auto';
+      }
+    }
+
+    function cycleTheme() {
+      const current = localStorage.getItem(THEME_KEY) || 'auto';
+      const next = current === 'auto' ? 'dark' : (current === 'dark' ? 'light' : 'auto');
+      if (next === 'auto') {
+        localStorage.removeItem(THEME_KEY);
+      } else {
+        localStorage.setItem(THEME_KEY, next);
+      }
+      applyTheme(next);
+    }
+
+    // Initialize theme preference from localStorage
+    applyTheme(localStorage.getItem(THEME_KEY) || 'auto');
+
     let todos = [];
     let currentFilter = 'all';
 
@@ -360,7 +509,7 @@
     }
 
     function escapeHtml(str) {
-      return str.replace(/[&<>'"]/g, 
+      return str.replace(/[&<>'"]/g,
         tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)
       );
     }
