@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 
 pub fn isValidTokenChar(c: u8) bool {
     return switch (c) {
@@ -47,6 +48,7 @@ pub const HeaderMap = struct {
     }
 
     pub fn get(self: *const HeaderMap, name: []const u8) ?[]const u8 {
+        assert(name.len > 0);
         for (self.entries.items) |entry| {
             if (std.ascii.eqlIgnoreCase(entry.name, name)) {
                 return entry.value;
@@ -56,9 +58,8 @@ pub const HeaderMap = struct {
     }
 
     pub fn set(self: *HeaderMap, name: []const u8, value: []const u8) !void {
-        if (!isValidHeaderName(name) or !isValidHeaderValue(value)) {
-            return error.InvalidHeaderCharacter;
-        }
+        if (!isValidHeaderName(name)) return error.InvalidHeaderCharacter;
+        if (!isValidHeaderValue(value)) return error.InvalidHeaderCharacter;
         for (self.entries.items) |*entry| {
             if (std.ascii.eqlIgnoreCase(entry.name, name)) {
                 entry.value = value;
@@ -72,9 +73,8 @@ pub const HeaderMap = struct {
     }
 
     pub fn add(self: *HeaderMap, name: []const u8, value: []const u8) !void {
-        if (!isValidHeaderName(name) or !isValidHeaderValue(value)) {
-            return error.InvalidHeaderCharacter;
-        }
+        if (!isValidHeaderName(name)) return error.InvalidHeaderCharacter;
+        if (!isValidHeaderValue(value)) return error.InvalidHeaderCharacter;
         try self.entries.append(self.allocator, .{
             .name = name,
             .value = value,

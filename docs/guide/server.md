@@ -13,7 +13,7 @@ const http = @import("lighting");
 
 var server = http.Server.init(allocator, io, .{
     .handler = root_handler,
-    .max_header_bytes = 16 * 1024,                  // Max allowed request header size (default: 8KB)
+    .header_bytes_max = 16 * 1024,                  // Max allowed request header size (default: 8KB)
     .read_timeout_ns = 10 * std.time.ns_per_s,      // Whole-request body read timeout
     .read_header_timeout_ns = 2 * std.time.ns_per_s,// Header parsing timeout
     .write_timeout_ns = 10 * std.time.ns_per_s,     // Response flush timeout
@@ -27,7 +27,7 @@ defer server.deinit();
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `handler` | `Handler` | *(Required)* | The root HTTP handler or router dispatching incoming requests. |
-| `max_header_bytes` | `usize` | `8 * 1024` (8KB) | Maximum memory allocated for reading and parsing request headers before returning `431 Request Header Fields Too Large`. |
+| `header_bytes_max` | `usize` | `8 * 1024` (8KB) | Maximum memory allocated for reading and parsing request headers before returning `431 Request Header Fields Too Large`. |
 | `read_header_timeout_ns`| `?u64` | `null` | Maximum duration allowed to read the HTTP request line and headers. |
 | `read_timeout_ns` | `?u64` | `null` | Maximum duration allowed to read the full request (including body). |
 | `write_timeout_ns` | `?u64` | `null` | Maximum duration allowed to write the response back to the client. |

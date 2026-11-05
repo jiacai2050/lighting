@@ -1,21 +1,18 @@
 const std = @import("std");
-const server_mod = @import("server.zig");
-const mime_mod = @import("mime.zig");
-const range_mod = @import("range.zig");
-const dir_mod = @import("dir.zig");
+const server = @import("server.zig");
+const mime = @import("mime.zig");
+const range = @import("range.zig");
+const dir = @import("dir.zig");
 
-pub const FileServer = server_mod.FileServer;
-pub const FileServerOptions = server_mod.FileServerOptions;
-pub const getMimeType = mime_mod.getMimeType;
-pub const parseRange = range_mod.parseRange;
-pub const ByteRange = range_mod.ByteRange;
-pub const RangeResult = range_mod.RangeResult;
-pub const DirEntry = dir_mod.DirEntry;
-pub const renderDirectory = dir_mod.renderDirectory;
+pub const FileServer = server.FileServer;
+pub const FileServerOptions = server.FileServerOptions;
+pub const getMimeType = mime.getMimeType;
+pub const parseRange = range.parseRange;
+pub const ByteRange = range.ByteRange;
+pub const RangeResult = range.RangeResult;
+pub const DirEntry = dir.DirEntry;
+pub const renderDirectory = dir.renderDirectory;
 
 test {
-    _ = server_mod;
-    _ = mime_mod;
-    _ = range_mod;
-    _ = dir_mod;
+    std.testing.refAllDecls(@This());
 }

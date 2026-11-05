@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**A High-Performance, Lightweight HTTP/1.1 Server for Zig 0.17**
+**A High-Performance, Lightweight HTTP Server for Zig 0.17**
 
 *Fast throughput, deterministic memory overhead, zero external dependencies.*
 

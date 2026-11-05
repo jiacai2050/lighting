@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 
 pub const Status = enum(u16) {
     @"continue" = 100,
@@ -97,6 +98,12 @@ pub const Status = enum(u16) {
         };
     }
 };
+
+comptime {
+    assert(@backingInt(Status.ok) == 200);
+    assert(@backingInt(Status.not_found) == 404);
+    assert(@backingInt(Status.internal_server_error) == 500);
+}
 
 test "Status phrase and code" {
     const s = Status.ok;

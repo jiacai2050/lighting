@@ -2,17 +2,17 @@ const std = @import("std");
 const ResponseWriter = @import("../../response_writer.zig").ResponseWriter;
 const Request = @import("../../request.zig").Request;
 const handshake = @import("handshake.zig");
-const conn_mod = @import("conn.zig");
-const frame_mod = @import("frame.zig");
+const conn = @import("conn.zig");
+const frame = @import("frame.zig");
 
-pub const Conn = conn_mod.Conn;
-pub const Options = conn_mod.Options;
-pub const Message = conn_mod.Message;
-pub const MessageType = conn_mod.MessageType;
-pub const Opcode = frame_mod.Opcode;
-pub const FrameHeader = frame_mod.FrameHeader;
+pub const Conn = conn.Conn;
+pub const Options = conn.Options;
+pub const Message = conn.Message;
+pub const MessageType = conn.MessageType;
+pub const Opcode = frame.Opcode;
+pub const FrameHeader = frame.FrameHeader;
 pub const HandshakeError = handshake.HandshakeError;
-pub const FrameError = frame_mod.FrameError;
+pub const FrameError = frame.FrameError;
 
 /// Upgrades an incoming HTTP request to a WebSocket connection per RFC 6455.
 /// Validates handshake headers, sends 101 Switching Protocols, hijacks the underlying socket,
@@ -37,7 +37,5 @@ pub fn upgrade(w: *ResponseWriter, req: *Request, options: Options) !Conn {
 }
 
 test {
-    _ = handshake;
-    _ = frame_mod;
-    _ = conn_mod;
+    std.testing.refAllDecls(@This());
 }

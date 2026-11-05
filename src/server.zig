@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const Handler = @import("handler.zig").Handler;
 const Request = @import("request.zig").Request;
 const ResponseWriter = @import("response_writer.zig").ResponseWriter;
@@ -8,7 +9,7 @@ const io_util = @import("proto/io_util.zig");
 
 pub const ServerOptions = struct {
     handler: Handler,
-    max_header_bytes: usize = 8 * 1024,
+    header_bytes_max: usize = 8 * 1024,
     read_timeout_ns: ?u64 = null,
     read_header_timeout_ns: ?u64 = null,
     write_timeout_ns: ?u64 = null,
@@ -31,9 +32,10 @@ pub const Server = struct {
     active_conns_head: ?*ConnNode = null,
     active_conns_mutex: std.Io.Mutex = .init,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, options: ServerOptions) Server {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, options: ServerOptions) Server {
+        assert(options.header_bytes_max > 0);
         return .{
-            .allocator = allocator,
+            .allocator = gpa,
             .io = io,
             .options = options,
             .group = .init,
@@ -67,10 +69,19 @@ pub const Server = struct {
         self.active_conns_mutex.lockUncancelable(self.io);
         var curr = self.active_conns_head;
         while (curr) |node| {
-            node.stream.shutdown(self.io, .both) catch {};
+            node.stream.shutdown(self.io, .both) catch |err| {
+                std.log.debug("connection shutdown error during stop: {}", .{err});
+            };
             curr = node.next;
         }
         self.active_conns_mutex.unlock(self.io);
+    }
+
+    fn writeErrorResponse(stream: std.Io.net.Stream, io: std.Io, comptime response: []const u8) void {
+        const msg = [1][]const u8{response};
+        _ = io_util.writeSocketAll(stream, io, &msg) catch |err| {
+            std.log.debug("writeErrorResponse failed: {}", .{err});
+        };
     }
 
     fn registerConnNode(self: *Server, node: *ConnNode) void {
@@ -126,8 +137,7 @@ pub const Server = struct {
             // Dispatch connection concurrently via std.Io.Group
             self.group.concurrent(self.io, serveConnWorker, .{ self, stream }) catch |err| {
                 if (err == error.ConcurrencyUnavailable) {
-                    const msg = [1][]const u8{"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n"};
-                    _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
+                    writeErrorResponse(stream, self.io, "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
                 } else {
                     std.log.warn("spawn concurrent worker error (dropping connection): {}", .{err});
                 }
@@ -154,7 +164,7 @@ pub const Server = struct {
         defer self.unregisterConnNode(&conn_node);
 
         // Allocate a dedicated connection read buffer (e.g. 8KB)
-        const conn_buf = self.allocator.alloc(u8, self.options.max_header_bytes) catch return;
+        const conn_buf = self.allocator.alloc(u8, self.options.header_bytes_max) catch return;
         defer self.allocator.free(conn_buf);
 
         var buf_len: usize = 0;
@@ -162,6 +172,8 @@ pub const Server = struct {
 
         // Keep-Alive connection loop
         while (self.running.load(.acquire)) {
+            assert(buf_len <= conn_buf.len);
+
             // 1. First check if complete HTTP headers already reside in buffer (Pipelining support)
             var head_end: ?usize = std.mem.indexOf(u8, conn_buf[0..buf_len], "\r\n\r\n");
             var header_deadline: ?std.Io.Timeout = null;
@@ -171,9 +183,8 @@ pub const Server = struct {
                 if (!self.running.load(.acquire)) return;
 
                 if (buf_len >= conn_buf.len) {
-                    // Exceeded max_header_bytes -> 431 Request Header Fields Too Large
-                    const msg = [1][]const u8{"HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n"};
-                    _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
+                    // Exceeded header_bytes_max -> 431 Request Header Fields Too Large
+                    writeErrorResponse(stream, self.io, "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n");
                     return;
                 }
 
@@ -210,8 +221,7 @@ pub const Server = struct {
 
                 const n = io_util.readSocketWithTimeout(stream, self.io, conn_buf[buf_len..], header_deadline.?) catch |err| {
                     if (err == error.Timeout) {
-                        const msg = [1][]const u8{"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n"};
-                        _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
+                        writeErrorResponse(stream, self.io, "HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n");
                         return;
                     }
                     return;
@@ -228,11 +238,9 @@ pub const Server = struct {
 
             var head = parseRequestHead(req_allocator, conn_buf[0..buf_len]) catch |err| {
                 if (err == error.UnsupportedTransferEncoding) {
-                    const msg = [1][]const u8{"HTTP/1.1 501 Not Implemented\r\nConnection: close\r\n\r\n"};
-                    _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
+                    writeErrorResponse(stream, self.io, "HTTP/1.1 501 Not Implemented\r\nConnection: close\r\n\r\n");
                 } else {
-                    const msg = [1][]const u8{"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"};
-                    _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
+                    writeErrorResponse(stream, self.io, "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
                 }
                 return;
             };
@@ -246,14 +254,14 @@ pub const Server = struct {
                 if (std.ascii.eqlIgnoreCase(trimmed, "100-continue")) {
                     if (head.version == .@"HTTP/1.1") {
                         const msg = [1][]const u8{"HTTP/1.1 100 Continue\r\n\r\n"};
-                        _ = io_util.writeSocketAll(stream, self.io, &msg) catch {
+                        _ = io_util.writeSocketAll(stream, self.io, &msg) catch |err| {
+                            std.log.debug("write 100 Continue error: {}", .{err});
                             return;
                         };
                     }
                 } else {
                     // Unknown expectation: 417 Expectation Failed
-                    const msg = [1][]const u8{"HTTP/1.1 417 Expectation Failed\r\nConnection: close\r\n\r\n"};
-                    _ = io_util.writeSocketAll(stream, self.io, &msg) catch {};
+                    writeErrorResponse(stream, self.io, "HTTP/1.1 417 Expectation Failed\r\nConnection: close\r\n\r\n");
                     return;
                 }
             }
@@ -387,6 +395,7 @@ pub const Server = struct {
 
                 if (b.unread_slice.len > 0) {
                     const leftover = b.unread_slice.len;
+                    assert(leftover <= conn_buf.len);
                     std.mem.copyForwards(u8, conn_buf[0..leftover], b.unread_slice);
                     buf_len = leftover;
                     is_idle = false;

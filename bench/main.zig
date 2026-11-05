@@ -66,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .max_header_bytes = 16 * 1024,
+        .header_bytes_max = 16 * 1024,
         .read_header_timeout_ns = 5 * std.time.ns_per_s, // 5s header read timeout (Slowloris defense)
         .read_timeout_ns = 30 * std.time.ns_per_s, // 30s body read timeout
         .write_timeout_ns = 30 * std.time.ns_per_s, // 30s response write timeout

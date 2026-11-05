@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const Status = @import("proto/status.zig").Status;
 const HeaderMap = @import("header.zig").HeaderMap;
 const io_util = @import("proto/io_util.zig");
@@ -26,6 +27,10 @@ pub const ResponseWriter = struct {
     // Lifecycle hook triggered immediately when socket is hijacked
     on_hijack: ?*const fn (*anyopaque) void = null,
     on_hijack_ctx: ?*anyopaque = null,
+
+    comptime {
+        assert(@sizeOf(ResponseWriter) <= 8192);
+    }
 
     pub fn init(
         stream: std.Io.net.Stream,
@@ -101,6 +106,7 @@ pub const ResponseWriter = struct {
 
     /// Appends data to internal buffer or flushes chunked
     pub fn write(self: *ResponseWriter, data: []const u8) !usize {
+        assert(self.buffer_len <= self.buffer.len);
         if (self.hijacked) return error.AlreadyHijacked;
         if (data.len == 0) return 0;
 

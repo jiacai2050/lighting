@@ -33,7 +33,7 @@ try mux.handle("GET /static/{path...}", fs.handler());
 | `auto_index` | `bool` | `true` | If `true`, renders a responsive directory listing when no `index.html` exists in the folder. |
 | `index_file` | `[]const u8` | `"index.html"` | Default file served when a directory is requested. |
 | `show_hidden` | `bool` | `false` | When `false`, requests targeting files or directories starting with `.` return `404 Not Found`. |
-| `chunk_size` | `usize` | `64 * 1024` (64KB) | Buffer size used for streaming file contents across the network. |
+| `chunk_bytes_max` | `usize` | `64 * 1024` (64KB) | Buffer size used for streaming file contents across the network. |
 
 ---
 

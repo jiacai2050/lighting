@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const io_util = @import("../../proto/io_util.zig");
 const frame = @import("frame.zig");
 const Opcode = frame.Opcode;
@@ -17,7 +18,7 @@ pub const Message = struct {
 };
 
 pub const Options = struct {
-    max_message_size: usize = 16 * 1024 * 1024, // 16 MB default limit
+    message_bytes_max: usize = 16 * 1024 * 1024, // 16 MB default limit
     read_timeout_ns: ?u64 = null,
     write_timeout_ns: ?u64 = null,
 };
@@ -29,6 +30,7 @@ pub const Conn = struct {
     closed: bool = false,
 
     pub fn init(stream: std.Io.net.Stream, io: std.Io, options: Options) Conn {
+        assert(options.message_bytes_max > 0);
         return .{
             .stream = stream,
             .io = io,
@@ -95,7 +97,7 @@ pub const Conn = struct {
             }
 
             // Enforce cumulative message size limit across fragmented data frames (N1)
-            if (!opcode.isControl() and accumulated.items.len + payload_len > self.options.max_message_size) return error.MessageTooLarge;
+            if (!opcode.isControl() and accumulated.items.len + payload_len > self.options.message_bytes_max) return error.MessageTooLarge;
 
             if (opcode.isControl()) {
                 if (!fin) return error.FragmentedControlFrame;
@@ -141,7 +143,9 @@ pub const Conn = struct {
                         echo_code = code;
                     }
                     // Echo back close frame if not already closed
-                    self.writeClose(echo_code, null) catch {};
+                    self.writeClose(echo_code, null) catch |err| {
+                        std.log.debug("ws close echo write error: {}", .{err});
+                    };
                     self.closed = true;
                     return Message{
                         .type = .close,
@@ -240,7 +244,9 @@ pub const Conn = struct {
                 payload_len += copy_len;
             }
         }
-        self.writeFrame(.close, close_buf[0..payload_len]) catch {};
+        self.writeFrame(.close, close_buf[0..payload_len]) catch |err| {
+            std.log.debug("ws close frame write error: {}", .{err});
+        };
     }
 
     /// Closes the underlying network stream.

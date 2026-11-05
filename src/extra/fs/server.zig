@@ -1,11 +1,12 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const ResponseWriter = @import("../../response_writer.zig").ResponseWriter;
 const Request = @import("../../request.zig").Request;
 const Handler = @import("../../handler.zig").Handler;
 const URL = @import("../../request.zig").URL;
 const mime = @import("mime.zig");
-const range_mod = @import("range.zig");
-const dir_mod = @import("dir.zig");
+const range = @import("range.zig");
+const dir = @import("dir.zig");
 
 pub const FileServerOptions = struct {
     /// Filesystem directory to serve
@@ -17,7 +18,7 @@ pub const FileServerOptions = struct {
     /// Whether to allow requests for hidden files/folders (starting with dot)
     show_hidden: bool = false,
     /// Stream read buffer size in bytes (default: 64KB)
-    chunk_size: usize = 64 * 1024,
+    chunk_bytes_max: usize = 64 * 1024,
     /// Optional URL prefix to strip (e.g. "/static") before resolving in root_dir
     strip_prefix: ?[]const u8 = null,
 };
@@ -26,9 +27,11 @@ pub const FileServer = struct {
     allocator: std.mem.Allocator,
     options: FileServerOptions,
 
-    pub fn init(allocator: std.mem.Allocator, options: FileServerOptions) FileServer {
+    pub fn init(gpa: std.mem.Allocator, options: FileServerOptions) FileServer {
+        assert(options.root_dir.len > 0);
+        assert(options.chunk_bytes_max > 0);
         return .{
-            .allocator = allocator,
+            .allocator = gpa,
             .options = options,
         };
     }
@@ -210,10 +213,10 @@ pub const FileServer = struct {
         self: *FileServer,
         w: *ResponseWriter,
         req: *Request,
-        dir: std.Io.Dir,
+        target_dir: std.Io.Dir,
         subpath: []const u8,
     ) anyerror!void {
-        const stat = try dir.statFile(w.io, subpath, .{});
+        const stat = try target_dir.statFile(w.io, subpath, .{});
 
         // Compute ETag: W/"<mtime_ns_hex>-<size_hex>"
         var etag_buf: [64]u8 = undefined;
@@ -250,7 +253,7 @@ pub const FileServer = struct {
 
         // Parse Range request (RFC 9110 Section 14)
         const range_hdr = req.headers.get("range");
-        const range_result = range_mod.parseRange(range_hdr, stat.size);
+        const range_result = range.parseRange(range_hdr, stat.size);
 
         switch (range_result) {
             .not_satisfiable => {
@@ -281,7 +284,7 @@ pub const FileServer = struct {
                 const cl_dup = try req.arena.dupe(u8, cl);
                 try w.header().set("Content-Length", cl_dup);
 
-                try self.streamFileRange(w, dir, subpath, r.start, r.length());
+                try self.streamFileRange(w, target_dir, subpath, r.start, r.length());
             },
             .none, .ignore => {
                 // 200 OK Full content
@@ -296,7 +299,7 @@ pub const FileServer = struct {
                 const cl_dup = try req.arena.dupe(u8, cl);
                 try w.header().set("Content-Length", cl_dup);
 
-                try self.streamFileRange(w, dir, subpath, 0, stat.size);
+                try self.streamFileRange(w, target_dir, subpath, 0, stat.size);
             },
         }
     }
@@ -304,17 +307,17 @@ pub const FileServer = struct {
     fn streamFileRange(
         self: *FileServer,
         w: *ResponseWriter,
-        dir: std.Io.Dir,
+        target_dir: std.Io.Dir,
         subpath: []const u8,
         start_offset: u64,
         total_len: u64,
     ) anyerror!void {
         if (total_len == 0 or w.is_head) return;
 
-        const file = try dir.openFile(w.io, subpath, .{});
+        const file = try target_dir.openFile(w.io, subpath, .{});
         defer file.close(w.io);
 
-        const chunk_buf = try self.allocator.alloc(u8, self.options.chunk_size);
+        const chunk_buf = try self.allocator.alloc(u8, self.options.chunk_bytes_max);
         defer self.allocator.free(chunk_buf);
 
         var remaining = total_len;
@@ -341,7 +344,7 @@ pub const FileServer = struct {
         var target_dir = try root_dir.openDir(w.io, dir_subpath, .{ .iterate = true });
         defer target_dir.close(w.io);
 
-        var entries = try std.ArrayList(dir_mod.DirEntry).initCapacity(req.arena, 16);
+        var entries = try std.ArrayList(dir.DirEntry).initCapacity(req.arena, 16);
 
         var it = target_dir.iterate();
         while (try it.next(w.io)) |entry| {
@@ -367,15 +370,15 @@ pub const FileServer = struct {
         }
 
         // Sort: directories first, then alphabetically
-        std.mem.sort(dir_mod.DirEntry, entries.items, {}, struct {
-            fn lessThan(_: void, a: dir_mod.DirEntry, b: dir_mod.DirEntry) bool {
+        std.mem.sort(dir.DirEntry, entries.items, {}, struct {
+            fn lessThan(_: void, a: dir.DirEntry, b: dir.DirEntry) bool {
                 if (a.is_dir != b.is_dir) return a.is_dir; // true (.is_dir) comes first
                 return std.ascii.lessThanIgnoreCase(a.name, b.name);
             }
         }.lessThan);
 
         const is_root = std.mem.eql(u8, dir_subpath, ".");
-        const html = try dir_mod.renderDirectory(req.arena, display_url, entries.items, is_root);
+        const html = try dir.renderDirectory(req.arena, display_url, entries.items, is_root);
 
         w.setStatus(.ok);
         try w.header().set("Content-Type", "text/html; charset=utf-8");

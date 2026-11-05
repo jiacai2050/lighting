@@ -26,4 +26,5 @@ review.md
 *.db
 *.db-journal
 book/
+.scratch/
 

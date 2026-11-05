@@ -178,7 +178,7 @@ test "e2e: 431 header too large and 500 internal server error" {
 
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
-        .max_header_bytes = 256, // small limit to easily test 431
+        .header_bytes_max = 256, // small limit to easily test 431
     });
     server.listener = listener;
     server.running.store(true, .release);
@@ -2610,7 +2610,7 @@ test "e2e: extra.ws fragmented message cumulative limit" {
 
     try mux.handleFunc("GET /ws-limited", struct {
         fn handle(w: *http.ResponseWriter, req: *http.Request) anyerror!void {
-            var conn = try http.extra.ws.upgrade(w, req, .{ .max_message_size = 20 });
+            var conn = try http.extra.ws.upgrade(w, req, .{ .message_bytes_max = 20 });
             defer conn.close();
 
             // When cumulative message size exceeds 20 bytes, readMessage fails with error.MessageTooLarge
@@ -2685,7 +2685,7 @@ test "e2e: extra.ws fragmented message cumulative limit" {
     // 3. Send fragment 1: 12 bytes (text, fin = false)
     try FrameHelper.sendFrameFin(io, client.socket.handle, 0x1, "123456789012", false);
 
-    // 4. Send fragment 2: 12 bytes (continuation, fin = true). Total 24 > max_message_size 20!
+    // 4. Send fragment 2: 12 bytes (continuation, fin = true). Total 24 > message_bytes_max 20!
     try FrameHelper.sendFrameFin(io, client.socket.handle, 0x0, "123456789012", true);
 
     // 5. Server will error with MessageTooLarge and terminate socket (EOF or RST)

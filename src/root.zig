@@ -26,18 +26,8 @@ pub const BodyReader = @import("proto/chunk_reader.zig").BodyReader;
 
 pub const extra = @import("extra/root.zig");
 
+pub const ThreadPool = @import("thread_pool.zig").ThreadPool;
+
 test {
     std.testing.refAllDecls(@This());
-    _ = @import("proto/method.zig");
-    _ = @import("proto/status.zig");
-    _ = @import("proto/parser.zig");
-    _ = @import("proto/chunk_reader.zig");
-    _ = @import("header.zig");
-    _ = @import("request.zig");
-    _ = @import("response_writer.zig");
-    _ = @import("handler.zig");
-    _ = @import("mux.zig");
-    _ = @import("thread_pool.zig");
-    _ = @import("server.zig");
-    _ = @import("extra/root.zig");
 }

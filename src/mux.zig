@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const Handler = @import("handler.zig").Handler;
 const ResponseWriter = @import("response_writer.zig").ResponseWriter;
 const Request = @import("request.zig").Request;
@@ -66,7 +67,7 @@ pub const RoutingNode = struct {
 
         const seg = segs[0];
         if (seg.multi) {
-            std.debug.assert(segs.len == 1);
+            assert(segs.len == 1);
             if (self.multi_child != null and self.multi_child.?.pattern != null) {
                 return error.PatternConflict;
             }
@@ -260,7 +261,7 @@ pub fn parsePattern(allocator: std.mem.Allocator, raw: []const u8) !Pattern {
 
     var seg_list = std.ArrayListUnmanaged(Segment).empty;
     while (path_part.len > 0) {
-        std.debug.assert(path_part[0] == '/');
+        assert(path_part[0] == '/');
         path_part = path_part[1..];
         if (path_part.len == 0) {
             // Trailing slash -> anonymous multi wildcard
@@ -308,14 +309,14 @@ pub const ServeMux = struct {
     root: *RoutingNode,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) ServeMux {
-        var arena = std.heap.ArenaAllocator.init(allocator);
+    pub fn init(gpa: std.mem.Allocator) ServeMux {
+        var arena = std.heap.ArenaAllocator.init(gpa);
         const root = arena.allocator().create(RoutingNode) catch unreachable;
         root.* = .{};
         return .{
             .arena = arena,
             .root = root,
-            .allocator = allocator,
+            .allocator = gpa,
         };
     }
 
@@ -327,6 +328,7 @@ pub const ServeMux = struct {
     /// Syntax: [METHOD ] [HOST]/[PATH]
     /// Wildcards: {id}, {path...}, {$}, trailing '/'
     pub fn handle(self: *ServeMux, pattern: []const u8, h: Handler) !void {
+        assert(pattern.len > 0);
         const parsed = try parsePattern(self.arena.allocator(), pattern);
         const arena_allocator = self.arena.allocator();
 
@@ -340,6 +342,7 @@ pub const ServeMux = struct {
 
     /// Convenience helper to register a function pointer
     pub fn handleFunc(self: *ServeMux, pattern: []const u8, comptime func: *const fn (*ResponseWriter, *Request) anyerror!void) !void {
+        assert(pattern.len > 0);
         try self.handle(pattern, Handler.fromFn(func));
     }
 
