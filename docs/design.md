@@ -87,7 +87,7 @@ flowchart TD
     style Connection_Loop stroke:#6b7280,stroke-width:2px,stroke-dasharray: 5 5;
 
     class Client,ConnClose,Reuse endpoint;
-    class Listener,Pool,ConnBuf,SocketRead,Parser,Arena,Req,Res,Router,Handler,OutVecs process;
+    class Listener,Fiber,ConnBuf,SocketRead,Parser,Arena,Req,Res,Router,Handler,OutVecs process;
     class Precheck,DrainCheck decision;
 ```
 

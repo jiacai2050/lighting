@@ -225,13 +225,15 @@ pub const FileServer = struct {
         const lm_str = ResponseWriter.formatHttpDate(&lm_buf, stat.mtime.toSeconds());
         const lm_dup = try req.arena.dupe(u8, lm_str);
 
-        // Check conditional If-None-Match (RFC 9111 Section 3.2, supports comma-separated list)
+        // Check conditional If-None-Match (RFC 9110 Section 8.8.3.2 / RFC 9111 Section 3.2: weak comparison & tag lists)
         if (req.headers.get("if-none-match")) |inm| {
             var it = std.mem.tokenizeScalar(u8, inm, ',');
             var matched = false;
+            const norm_etag = if (std.mem.startsWith(u8, etag, "W/")) etag[2..] else etag;
             while (it.next()) |raw_tag| {
                 const tag = std.mem.trim(u8, raw_tag, " \t");
-                if (std.mem.eql(u8, tag, "*") or std.mem.eql(u8, tag, etag)) {
+                const norm_tag = if (std.mem.startsWith(u8, tag, "W/")) tag[2..] else tag;
+                if (std.mem.eql(u8, tag, "*") or std.mem.eql(u8, norm_tag, norm_etag)) {
                     matched = true;
                     break;
                 }

@@ -1,0 +1,14 @@
+[book]
+authors = ["jiacai2050"]
+language = "en"
+src = "docs"
+title = "Lighting Documentation"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/jiacai2050/lighting"
+edit-url-template = "https://github.com/jiacai2050/lighting/edit/main/{path}"
+site-url = "/lighting/"
+additional-js = ["docs/mermaid-init.js"]

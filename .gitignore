@@ -25,3 +25,5 @@ review.md
 .review/
 *.db
 *.db-journal
+book/
+

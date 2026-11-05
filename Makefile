@@ -1,4 +1,4 @@
-.PHONY: help build test fmt fmt-check bench run-hello run-todo run-ws run-fs clean
+.PHONY: help build test fmt fmt-check bench run-hello run-todo run-ws run-fs docs docs-serve clean
 
 .DEFAULT_GOAL := help
 
@@ -35,5 +35,11 @@ run-ws: ## Run the WebSocket chat & echo example server
 run-fs: ## Run the static file server example
 	cd examples/fs && zig build run
 
+docs: ## Build documentation with mdBook
+	mdbook build
+
+docs-serve: ## Serve documentation locally with mdBook
+	mdbook serve --open
+
 clean: ## Clean build artifacts and temporary cache
-	rm -rf zig-out .zig-cache examples/hello/zig-out examples/hello/.zig-cache examples/todo/zig-out examples/todo/.zig-cache examples/ws/zig-out examples/ws/.zig-cache examples/fs/zig-out examples/fs/.zig-cache *.db *.db-journal
+	rm -rf zig-out .zig-cache book examples/hello/zig-out examples/hello/.zig-cache examples/todo/zig-out examples/todo/.zig-cache examples/ws/zig-out examples/ws/.zig-cache examples/fs/zig-out examples/fs/.zig-cache *.db *.db-journal
