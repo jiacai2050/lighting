@@ -9,27 +9,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
-    const exe = b.addExecutable(.{
-        .name = "bench-server",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "lighting", .module = mod },
-            },
-        }),
-    });
-
-    b.installArtifact(exe);
-
-    const bench_cmd = b.addRunArtifact(exe);
-    bench_cmd.step.dependOn(b.getInstallStep());
-    bench_cmd.addPassthruArgs();
-
-    const bench_step = b.step("bench", "Run the benchmark server");
-    bench_step.dependOn(&bench_cmd.step);
-
     const mod_tests = b.addTest(.{
         .name = "lighting_test",
         .root_module = mod,

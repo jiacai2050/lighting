@@ -2,7 +2,7 @@
 
 Welcome to the **Lighting** documentation.
 
-**Lighting** is a high-performance, lightweight HTTP/1.1 server library written for **Zig 0.17**, featuring idiomatic Go-aligned ergonomics, structured concurrency via `std.Io.Group`, deterministic memory overhead, and zero external dependencies.
+**Lighting** is a high-performance, lightweight web framework written in **Zig**, featuring idiomatic Go-aligned ergonomics, structured concurrency via `std.Io.Group`, deterministic memory overhead, and zero external dependencies.
 
 ---
 

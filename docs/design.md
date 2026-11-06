@@ -1,4 +1,4 @@
-# Zig 0.17 HTTP/1.1 Server Design & Implementation Specification
+# Lighting Web Framework Design & Implementation Specification
 
 > **Version**: 1.0.0  
 > **Language Version**: Zig 0.17.0  

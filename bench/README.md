@@ -1,0 +1,108 @@
+# Lighting Benchmark Suite: Zig vs Go vs Rust
+
+This directory contains comparative micro-benchmarks comparing **Lighting (Zig)** against industry-standard web servers in **Go** and **Rust**:
+
+1. **Zig (Lighting)**: Standalone build in `bench/zig/`. Supports pluggable I/O runtime via the `IO` environment variable:
+   - `IO=zio` (default): powered by [`lalinsky/zio`](https://github.com/lalinsky/zio) asynchronous runtime with work-stealing executors.
+   - `IO=std`: powered by Zig standard library `std.Io` and `std.Io.Group.concurrent`.
+2. **Go (`net/http`)**: Go 1.22+ standard library `http.NewServeMux` with native pattern matching (`{id}` and `{filepath...}`) and Goroutine-per-connection scheduling.
+3. **Rust (`actix-web`)**: Actix-web 4.x on Tokio multi-threaded runtime, representing one of the fastest web frameworks in the Rust ecosystem.
+
+---
+
+## Benchmark Scenarios
+
+The suite evaluates four distinct workloads to measure both raw I/O throughput and framework routing/parsing overhead:
+
+| Scenario | HTTP Method & Path | Payload / Response | Primary Metric Tested |
+| :--- | :--- | :--- | :--- |
+| **Case 1: Minimal Ping** | `GET /ping` | `text/plain`<br>`"pong\n"` | **Raw HTTP Framing & I/O Loop**: Evaluates baseline connection handling, keep-alive reuse, and minimal response overhead. |
+| **Case 2: Dynamic Route & JSON** | `GET /users/{id}` (e.g. `42`) | `application/json`<br>`{"user_id":"42"}` | **Trie Routing & Parameter Extraction**: Evaluates path parameter matching, URL parsing, and JSON serialization overhead. |
+| **Case 3: Request Body Echo** | `POST /echo` (1KB payload) | `text/plain`<br>`"Echo: ...\n"` | **Stream Buffering & Payload Handling**: Evaluates incoming request body reading, chunk buffering, and payload write-back. |
+| **Case 4: Wildcard Catch-All** | `GET /files/{filepath...}` | `text/plain`<br>`"Serving: ...\n"` | **Deep Path Routing & Backtracking**: Evaluates multi-segment wildcard matching across deep nested URL segments. |
+
+---
+
+## Directory Structure
+
+```
+bench/
+├── zig/                       # Standalone Zig project (Lighting + pluggable I/O)
+│   ├── build.zig
+│   ├── build.zig.zon
+│   └── main.zig
+├── go/                        # Standalone Go 1.22+ net/http project
+│   ├── go.mod
+│   └── main.go
+├── rust/                      # Standalone Rust actix-web 4.x project
+│   ├── Cargo.toml
+│   └── src/
+│       └── main.rs
+├── run.sh                     # Automated runner and comparative table generator (wrk)
+└── README.md                  # This documentation
+```
+
+---
+
+## Prerequisites
+
+- Bash 4.0+ (macOS default `/bin/bash` is 3.2; install via `brew install bash`)
+- [wrk](https://github.com/wg/wrk) (`brew install wrk` on macOS, or `apt-get install wrk` on Linux)
+- Zig 0.17.0+
+- Go 1.22.0+
+- Rust 1.80+ (with Cargo)
+- `curl`, `bc`, `lsof`, `python3`
+
+---
+
+## Running the Automated Benchmark Suite
+
+Run the full comparative suite across all configurations:
+
+```bash
+./bench/run.sh
+# or from root:
+make bench-all
+```
+
+### Configurable Environment Variables
+
+```bash
+PORT=8088 THREADS=4 CONCURRENCY=50 DURATION=10s ./bench/run.sh
+```
+
+The script will:
+1. Compile all implementations in optimal release mode (`ReleaseFast` for Zig, `-ldflags="-s -w"` for Go, `--release` for Rust).
+2. Sequentially boot each server, verify HTTP readiness, and perform a 2s warmup.
+3. Execute `wrk` load tests for each of the 4 benchmark cases.
+4. Track CPU utilization (both idle and under active load) and memory RSS (idle vs peak).
+5. Print a comparative Markdown table with QPS, average latency, CPU usage, and memory consumption.
+
+---
+
+## Running Individual Servers
+
+### 1. Zig (Lighting)
+```bash
+cd bench/zig
+
+# Run with lalinsky/zio runtime (default)
+IO=zio zig build run -Doptimize=ReleaseFast
+
+# Or run with Zig standard library std.Io
+IO=std zig build run -Doptimize=ReleaseFast
+```
+
+### 2. Go (`net/http`)
+```bash
+cd bench/go
+go build -ldflags="-s -w" -o bench-go main.go
+PORT=8088 ./bench-go
+```
+
+### 3. Rust (`actix-web`)
+```bash
+cd bench/rust
+cargo build --release
+PORT=8088 ./target/release/lighting-bench-rust
+```

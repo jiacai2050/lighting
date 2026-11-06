@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**A High-Performance, Lightweight HTTP Server for Zig 0.17**
+**A High-Performance, Lightweight Web Framework for Zig**
 
 *Fast throughput, deterministic memory overhead, zero external dependencies.*
 
@@ -26,7 +26,7 @@
 
 ## Quick Start
 
-A minimal HTTP server with pattern-based routing and request logging:
+A minimal web application with pattern-based routing and request logging:
 
 ```zig
 const std = @import("std");

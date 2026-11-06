@@ -1,6 +1,6 @@
 # Quick Start
 
-In this guide, you will build a complete, runnable HTTP server using Lighting in under 5 minutes.
+In this guide, you will build a complete, runnable web application using Lighting in under 5 minutes.
 
 ---
 
@@ -48,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer server.deinit();
 
-    std.debug.print("🚀 Lighting HTTP server running at http://127.0.0.1:8080\n", .{});
+    std.debug.print("🚀 Lighting web server running at http://127.0.0.1:8080\n", .{});
     try server.listenAndServe("127.0.0.1", 8080);
 }
 ```

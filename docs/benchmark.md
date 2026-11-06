@@ -1,10 +1,10 @@
-# Lighting HTTP/1.1 Server Benchmark Guide & Methodology
+# Lighting Web Framework Benchmark Guide & Methodology
 
 > **Target Version**: Zig 0.17.0
-> **Default Port**: `7000`
-> **Server Binary**: `bench/main.zig`
+> **Default Port**: `7000` (or `8088` in multi-target benchmarks)
+> **Server Binary**: `bench/zig/main.zig`
 
-This document provides a comprehensive guide for conducting load tests, benchmarking throughput, and measuring latency characteristics of the **Lighting** HTTP/1.1 server.
+This document provides a comprehensive guide for conducting load tests, benchmarking throughput, and measuring latency characteristics of the **Lighting** web framework.
 
 ---
 
@@ -35,7 +35,8 @@ ulimit -n 65535
 Always benchmark with optimization enabled. Zig's `Debug` mode contains safety runtime assertions and unoptimized codegen intended for debugging.
 
 ```bash
-# Build the optimized binary in ReleaseFast mode
+# Navigate to the benchmark directory and build in ReleaseFast mode
+cd bench/zig
 zig build -Doptimize=ReleaseFast
 
 # The output executable is located at:
@@ -49,19 +50,21 @@ zig build -Doptimize=ReleaseFast
 Launch the test server in an independent terminal window:
 
 ```bash
-# Run with ReleaseFast optimization
-zig build bench -Doptimize=ReleaseFast
+# Run with ReleaseFast optimization (from bench/zig)
+cd bench/zig && zig build run -Doptimize=ReleaseFast
+
+# Or run from project root:
+make bench
 
 # Expected console output:
-# info: Server listening on http://127.0.0.1:7000...
+# info: Lighting benchmark server running on http://127.0.0.1:7000 (io=zio, threads=4)
 ```
 
 The benchmark server configures the following endpoints:
-* `GET /ping` — Exact match static response (`pong`).
-* `GET /users/{id}` — Go 1.22+ dynamic route parameter extraction (`{"user_id":"..."}`).
-* `POST /users` — Body reading and echo (`{"status":"created","data":"..."}`).
-* `GET /files/{filepath...}` — Multi-segment catch-all wildcard routing.
-* `GET /{$}` — Exact root path match.
+* `GET /ping` — Exact match static response (`pong\n`).
+* `GET /users/{id}` — Dynamic route parameter extraction (`{"user_id":"..."}\n`).
+* `POST /echo` — Request body reading and echo (`Echo: ...\n`).
+* `GET /files/{filepath...}` — Multi-segment catch-all wildcard routing (`Serving: ...\n`).
 
 ---
 
@@ -106,17 +109,15 @@ ab -k -c 50 -n 10000 http://127.0.0.1:7000/users/42
 ```
 
 #### Scenario D: POST Endpoint with Request Body
-Measures streamed body reading and JSON response generation:
+Measures streamed body reading and echo response generation:
 
 ```bash
-# 1. Create temporary JSON payload
-echo -n '{"name":"lighting","role":"benchmark"}' > /tmp/payload.json
+# 1. Create temporary test payload in repository scratch directory
+mkdir -p .scratch
+echo -n "Lighting benchmark request payload" > .scratch/payload.txt
 
 # 2. Run POST benchmark
-ab -k -c 50 -n 10000 -p /tmp/payload.json -T "application/json" http://127.0.0.1:7000/users
-
-# 3. Clean up
-rm -f /tmp/payload.json
+ab -k -c 50 -n 10000 -p .scratch/payload.txt -T "text/plain" http://127.0.0.1:7000/echo
 ```
 
 #### Scenario E: Multi-Segment Catch-All Wildcard (`/files/{filepath...}`)
@@ -178,11 +179,26 @@ The following measurements were captured on an Apple Silicon M-series workstatio
 | `GET /ping` | Short-lived | 20 | 2,000 | **28,279.34** | 0.035 ms | 0 |
 | `GET /ping` | Keep-Alive | 50 | 10,000 | **73,934.97** | 0.014 ms | 0 |
 | `GET /users/42` | Keep-Alive (Params) | 50 | 10,000 | **83,434.15** | 0.012 ms | 0 |
-| `POST /users` | Keep-Alive (Body) | 50 | 10,000 | **76,489.44** | 0.013 ms | 0 |
+| `POST /echo` | Keep-Alive (Body) | 50 | 10,000 | **76,489.44** | 0.013 ms | 0 |
 
 ---
 
-## 7. Alternative Multi-Threaded Tools
+## 7. Automated Multi-Target Benchmark Suite (Zig vs Go vs Rust)
+
+To run the automated comparative benchmark comparing Lighting against Go (`net/http`) and Rust (`actix-web`):
+
+```bash
+# Run all targets with wrk
+make bench-all
+# or directly:
+./bench/run.sh
+```
+
+See [`bench/README.md`](../bench/README.md) for full details on parameters, per-target builds, and CPU/memory tracking.
+
+---
+
+## 8. Alternative Multi-Threaded Tools
 
 If benchmarking from multiple CPU client cores with tools such as `wrk` or `bombardier`:
 

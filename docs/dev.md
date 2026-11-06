@@ -1,6 +1,6 @@
 # Lighting Development & Debugging Guide
 
-This guide compiles common workflows, debugging tips, and verification techniques for working on the **Lighting** HTTP server.
+This guide compiles common workflows, debugging tips, and verification techniques for working on the **Lighting** web framework.
 
 ---
 

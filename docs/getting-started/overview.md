@@ -1,6 +1,6 @@
 # Overview & Philosophy
 
-**Lighting** is a modern HTTP/1.1 server framework designed specifically for **Zig 0.17**. It bridges two worlds: the proven, ergonomic developer experience of Go's `net/http` and the low-level mechanical sympathy, zero-allocation control, and deterministic memory safety of Zig.
+**Lighting** is a modern web framework for **Zig**. It bridges two worlds: the proven, ergonomic developer experience of Go's `net/http` and the low-level mechanical sympathy, zero-allocation control, and deterministic memory safety of Zig.
 
 ---
 

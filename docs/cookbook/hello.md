@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
     try mux.handleFunc("GET /{$}", struct {
         fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
             try w.header().set("Content-Type", "text/plain; charset=utf-8");
-            try w.writeAll("⚡️ Welcome to Lighting HTTP server!\n");
+            try w.writeAll("⚡️ Welcome to Lighting web framework!\n");
         }
     }.handle);
 
