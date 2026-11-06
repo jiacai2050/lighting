@@ -23,6 +23,23 @@ The suite evaluates four distinct workloads to measure both raw I/O throughput a
 
 ---
 
+## Timeout Alignment Across Frameworks
+
+To guarantee an apples-to-apples comparison, connection and request timeout configurations are strictly harmonized across all three implementations:
+
+| Timeout Dimension | Zig (Lighting) | Go (`net/http`) | Rust (`actix-web`) | Configured Value | Description |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Header Read Timeout** | `read_header_timeout_ns` | `ReadHeaderTimeout` | `client_request_timeout` | **5s** | Slowloris defense; maximum time window allowed for the client to complete sending HTTP request headers. |
+| **Connection Idle Timeout** | `idle_timeout_ns` | `IdleTimeout` | `keep_alive` | **120s** | Maximum idle duration to keep an inactive persistent Keep-Alive connection open before closing. |
+
+> [!NOTE]
+> **Why socket-level Read / Write timeouts are omitted**:
+> - In **Go** and **Zig**, `ReadTimeout` and `WriteTimeout` enforce deadlines directly at the physical socket transport layer (Layer 4), terminating connections when kernel socket buffers stall.
+> - In **Rust (actix-web / Tokio)**, the server operates on a purely asynchronous, non-blocking Future stream without socket-level write deadlines. While application-layer middleware (`wrap_fn`) can enforce a handler execution timeout, it completes as soon as `HttpResponse` is constructed and cannot track whether subsequent socket `writev` flushes are blocked by network congestion.
+> - Because application-layer Future timeouts and transport-layer socket deadlines are fundamentally asymmetrical, the benchmark aligns strictly on the two genuine transport-level lifecycles: **Header Read Timeout (5s)** and **Keep-Alive Idle Timeout (120s)**.
+
+---
+
 ## Directory Structure
 
 ```
@@ -38,7 +55,7 @@ bench/
 │   ├── Cargo.toml
 │   └── src/
 │       └── main.rs
-├── run.sh                     # Automated runner and comparative table generator (wrk)
+├── run.py                     # Automated benchmark runner and comparative report generator
 └── README.md                  # This documentation
 ```
 
@@ -46,12 +63,12 @@ bench/
 
 ## Prerequisites
 
-- Bash 4.0+ (macOS default `/bin/bash` is 3.2; install via `brew install bash`)
+- Python 3.8+
 - [wrk](https://github.com/wg/wrk) (`brew install wrk` on macOS, or `apt-get install wrk` on Linux)
 - Zig 0.17.0+
 - Go 1.22.0+
 - Rust 1.80+ (with Cargo)
-- `curl`, `bc`, `lsof`, `python3`
+- `curl`, `lsof`
 
 ---
 
@@ -60,7 +77,7 @@ bench/
 Run the full comparative suite across all configurations:
 
 ```bash
-./bench/run.sh
+python3 bench/run.py
 # or from root:
 make bench-all
 ```
@@ -68,7 +85,7 @@ make bench-all
 ### Configurable Environment Variables
 
 ```bash
-PORT=8088 THREADS=4 CONCURRENCY=50 DURATION=10s ./bench/run.sh
+PORT=8088 THREADS=4 CONCURRENCY=50 DURATION=10s python3 bench/run.py
 ```
 
 The script will:

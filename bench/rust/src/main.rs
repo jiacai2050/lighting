@@ -1,5 +1,6 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use std::env;
+use std::time::Duration;
 
 async fn ping() -> impl Responder {
     HttpResponse::Ok()
@@ -48,6 +49,11 @@ async fn main() -> std::io::Result<()> {
             .route("/echo", web::post().to(echo))
             .route("/files/{filepath:.*}", web::get().to(files))
     })
+    // Timeout settings strictly aligned with Zig (Lighting) and Go (net/http):
+    // 1. Header read timeout (5s) for Slowloris defense
+    .client_request_timeout(Duration::from_secs(5))
+    // 2. Connection idle timeout (120s) for Keep-Alive connection reuse
+    .keep_alive(Duration::from_secs(120))
     .bind(("127.0.0.1", port))?
     .run()
     .await

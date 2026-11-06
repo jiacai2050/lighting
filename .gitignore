@@ -27,8 +27,9 @@ review.md
 *.db-journal
 book/
 .scratch/
+__pycache__/
+*.pyc
 bench/rust/target/
 bench/go/bench-go
 bench/zig/zig-out/
 bench/zig/.zig-cache/
-

@@ -24,7 +24,7 @@ bench: ## Run the Zig benchmark server
 	cd bench/zig && zig build run -Doptimize=ReleaseFast
 
 bench-all: ## Run the comparative benchmark suite across Zig, Go, and Rust
-	./bench/run.sh
+	python3 bench/run.py
 
 run-hello: ## Run the hello example server
 	cd examples/hello && zig build run

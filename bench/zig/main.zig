@@ -71,8 +71,6 @@ pub fn main(init: std.process.Init) !void {
         .handler = mux.handler(),
         .header_bytes_max = 16 * 1024,
         .read_header_timeout_ns = 5 * std.time.ns_per_s,
-        .read_timeout_ns = 30 * std.time.ns_per_s,
-        .write_timeout_ns = 30 * std.time.ns_per_s,
         .idle_timeout_ns = 120 * std.time.ns_per_s,
     });
     defer server.deinit();

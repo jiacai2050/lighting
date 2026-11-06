@@ -191,8 +191,12 @@ To run the automated comparative benchmark comparing Lighting against Go (`net/h
 # Run all targets with wrk
 make bench-all
 # or directly:
-./bench/run.sh
+python3 bench/run.py
 ```
+
+All benchmark targets enforce harmonized timeout parameters to ensure parity:
+* **Header Read Timeout**: 5s (`read_header_timeout_ns` in Zig, `ReadHeaderTimeout` in Go, `client_request_timeout` in Rust)
+* **Connection Idle Timeout**: 120s (`idle_timeout_ns` in Zig, `IdleTimeout` in Go, `keep_alive` in Rust)
 
 See [`bench/README.md`](../bench/README.md) for full details on parameters, per-target builds, and CPU/memory tracking.
 
