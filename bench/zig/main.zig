@@ -7,7 +7,7 @@ pub const std_options: std.Options = .{
 };
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
+    const allocator = std.heap.smp_allocator;
     const port: u16 = if (init.environ_map.get("PORT")) |p| std.fmt.parseInt(u16, p, 10) catch 7000 else 7000;
     const io_backend = init.environ_map.get("IO") orelse "zio";
 
@@ -18,7 +18,9 @@ pub fn main(init: std.process.Init) !void {
     const io = if (is_std)
         init.io
     else blk: {
-        const rt = try zio.Runtime.init(allocator, .{});
+        const rt = try zio.Runtime.init(allocator, .{
+            .executors = .auto,
+        });
         rt_opt = rt;
         break :blk rt.io();
     };

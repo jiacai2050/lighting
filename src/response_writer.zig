@@ -339,6 +339,56 @@ pub const ResponseWriter = struct {
             self.status_code.phrase(),
         }) catch unreachable;
 
+        // Fast Path: serialize status line and headers into a contiguous 1KB stack buffer
+        // to issue a single atomic socket write (1-2 iovecs: [headers, body]) instead of
+        // scattering across 10-20 tiny iovecs which causes multi-syscall amplification.
+        var header_buf: [1024]u8 = undefined;
+        var h_len: usize = status_line.len;
+        var fits = h_len <= header_buf.len;
+        if (fits) {
+            @memcpy(header_buf[0..status_line.len], status_line);
+            for (self.headers.entries.items) |entry| {
+                const needed = entry.name.len + 2 + entry.value.len + 2;
+                if (h_len + needed > header_buf.len) {
+                    fits = false;
+                    break;
+                }
+                @memcpy(header_buf[h_len .. h_len + entry.name.len], entry.name);
+                h_len += entry.name.len;
+                @memcpy(header_buf[h_len .. h_len + 2], ": ");
+                h_len += 2;
+                @memcpy(header_buf[h_len .. h_len + entry.value.len], entry.value);
+                h_len += entry.value.len;
+                @memcpy(header_buf[h_len .. h_len + 2], "\r\n");
+                h_len += 2;
+            }
+            if (fits) {
+                if (h_len + 2 <= header_buf.len) {
+                    @memcpy(header_buf[h_len .. h_len + 2], "\r\n");
+                    h_len += 2;
+                } else {
+                    fits = false;
+                }
+            }
+        }
+
+        if (fits) {
+            var vecs: [2][]const u8 = undefined;
+            vecs[0] = header_buf[0..h_len];
+            var v_count: usize = 1;
+
+            if (!self.chunked_mode and self.buffer_len > 0) {
+                vecs[1] = self.buffer[0..self.buffer_len];
+                v_count = 2;
+                self.bytes_written += self.buffer_len;
+                self.buffer_len = 0;
+            }
+
+            self.header_written = true;
+            try io_util.writeSocketAllTimeout(self.stream, self.io, vecs[0..v_count], self.write_timeout_ns);
+            return;
+        }
+
         // Optimization: Zero-allocation stack buffer for response slices
         var stack_vecs: [64][]const u8 = undefined;
         var vec_count: usize = 0;

@@ -39,13 +39,15 @@ echo "[1/3] Building Zig (Lighting - ReleaseFast in bench/zig)..."
 (cd "$PROJECT_ROOT/bench/zig" && zig build -Doptimize=ReleaseFast)
 ZIG_BIN="$PROJECT_ROOT/bench/zig/zig-out/bin/bench-server"
 
-echo "[2/3] Building Go (net/http - Release in bench/go)..."
-(cd "$PROJECT_ROOT/bench/go" && go build -ldflags="-s -w" -o bench-go main.go)
-GO_BIN="$PROJECT_ROOT/bench/go/bench-go"
+if [ "${ONLY_ZIG:-0}" != "1" ]; then
+    echo "[2/3] Building Go (net/http - Release in bench/go)..."
+    (cd "$PROJECT_ROOT/bench/go" && go build -ldflags="-s -w" -o bench-go main.go)
+    GO_BIN="$PROJECT_ROOT/bench/go/bench-go"
 
-echo "[3/3] Building Rust (actix-web - Release in bench/rust)..."
-(cd "$PROJECT_ROOT/bench/rust" && cargo build --release)
-RUST_BIN="$PROJECT_ROOT/bench/rust/target/release/lighting-bench-rust"
+    echo "[3/3] Building Rust (actix-web - Release in bench/rust)..."
+    (cd "$PROJECT_ROOT/bench/rust" && cargo build --release)
+    RUST_BIN="$PROJECT_ROOT/bench/rust/target/release/lighting-bench-rust"
+fi
 
 # Prepare static Lua script for POST /echo benchmark
 mkdir -p "$PROJECT_ROOT/.scratch"
@@ -250,12 +252,21 @@ else:
 }
 
 # Run benchmarks for all configurations
-TARGETS=("Zig_Lighting_zio" "Zig_Lighting_std" "Go_net_http" "Rust_actix_web")
+TARGETS=()
 
 bench_target "Zig_Lighting_zio" "$ZIG_BIN" "IO=zio"
+TARGETS+=("Zig_Lighting_zio")
+
 bench_target "Zig_Lighting_std" "$ZIG_BIN" "IO=std"
-bench_target "Go_net_http" "$GO_BIN" ""
-bench_target "Rust_actix_web" "$RUST_BIN" ""
+TARGETS+=("Zig_Lighting_std")
+
+if [ "${ONLY_ZIG:-0}" != "1" ]; then
+    bench_target "Go_net_http" "$GO_BIN" ""
+    TARGETS+=("Go_net_http")
+
+    bench_target "Rust_actix_web" "$RUST_BIN" ""
+    TARGETS+=("Rust_actix_web")
+fi
 
 # Print Formatted Markdown Table
 echo "================================================================================"
