@@ -6,6 +6,7 @@ const Status = @import("proto/status.zig").Status;
 const HeaderMap = @import("header.zig").HeaderMap;
 const io_util = @import("proto/io_util.zig");
 const Version = @import("proto/parser.zig").Version;
+const Cookie = @import("cookie.zig").Cookie;
 
 /// ResponseWriter coordinates writing an HTTP response back to the client.
 ///
@@ -119,6 +120,12 @@ pub const ResponseWriter = struct {
     /// setStatus is an alias for writeHeader.
     pub fn setStatus(self: *ResponseWriter, status: Status) void {
         self.writeHeader(status);
+    }
+
+    /// setCookie serializes cookie into RFC 6265 Set-Cookie format and appends it to the response headers.
+    pub fn setCookie(self: *ResponseWriter, cookie: Cookie) !void {
+        const cookie_str = try cookie.format(self.arena);
+        try self.headers.add("Set-Cookie", cookie_str);
     }
 
     /// write writes a slice of data into the HTTP response body.

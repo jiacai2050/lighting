@@ -24,6 +24,18 @@ pub const URL = @import("request.zig").URL;
 /// Multi-value URL query parameter map paralleling Go's url.Values.
 pub const QueryParams = @import("request.zig").QueryParams;
 
+/// HTTP Cookie representation and Set-Cookie builder conforming to RFC 6265.
+pub const Cookie = @import("cookie.zig").Cookie;
+
+/// SameSite cookie attribute policy.
+pub const SameSite = @import("cookie.zig").SameSite;
+
+/// Parsed multipart/form-data container for form values and file uploads.
+pub const MultipartForm = @import("multipart.zig").MultipartForm;
+
+/// Uploaded file header within a multipart/form-data body.
+pub const FileHeader = @import("multipart.zig").FileHeader;
+
 /// HTTP response generator with dual-mode buffering and socket hijacking.
 pub const ResponseWriter = @import("response_writer.zig").ResponseWriter;
 
@@ -35,6 +47,12 @@ pub const LoggingHandler = @import("handler.zig").LoggingHandler;
 
 /// Middleware constructor function type `*const fn (Handler) Handler`.
 pub const MiddlewareFn = @import("handler.zig").MiddlewareFn;
+
+/// Route-level timeout middleware wrapping a Handler.
+pub const TimeoutHandler = @import("timeout.zig").TimeoutHandler;
+
+/// Constructs a TimeoutHandler wrapping next with a nanosecond duration limit.
+pub const timeoutHandler = @import("timeout.zig").timeoutHandler;
 
 /// HTTP request multiplexer matching incoming requests against URL patterns.
 pub const ServeMux = @import("mux.zig").ServeMux;

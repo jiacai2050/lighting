@@ -17,7 +17,7 @@
 1. **API Parity with Go `net/http`**: Provides identical developer experience with `w.writeAll()`, `w.header().set()`, `w.writeHeader()`, `r.pathValue()`, and `ServeMux`.
 2. **Zero-Copy First**: The request line, URL, and header names/values are directly sliced from the underlying socket read buffer without redundant allocations or copies.
 3. **Deterministic Memory Lifecycles**: Each HTTP request is backed by an independent `ArenaAllocator`, performing an $O(1)$ bulk deallocation immediately after request completion to prevent memory fragmentation and leaks.
-4. **Kernel-Grade Synchronization with Zero Busy Waiting**: Leverages Zig 0.17 futex synchronization primitives (`std.Io.Mutex` and `std.Io.Condition`), ensuring **0.0% CPU usage** when idling.
+4. **Kernel-Grade Synchronization with Zero Busy Waiting**: Leverages standard futex synchronization primitives (`std.Io.Mutex` and `std.Io.Condition`), ensuring **0.0% CPU usage** when idling.
 
 ---
 
@@ -25,13 +25,24 @@
 
 ### 2.1 Module Structure
 ```
-zig-server/
-├── build.zig                 # Zig 0.17 build script
+lighting/
+├── build.zig                 # Build script and test targets
 ├── build.zig.zon             # Package metadata
 ├── bench/
 │   └── main.zig              # Benchmark server and endpoint test harness
 ├── docs/
 │   └── design.md             # This design document
+├── tests/
+│   └── e2e/                  # End-to-end integration test suite
+│       ├── helpers.zig       # TestServer and I/O test fixtures
+│       ├── root.zig          # E2E test suite aggregator
+│       ├── proto_test.zig    # Core HTTP semantics
+│       ├── routing_test.zig  # Pattern routing and matching
+│       ├── rfc_security_test.zig # RFC 9112 and security compliance
+│       ├── concurrency_test.zig # Server lifecycle and workers
+│       ├── streaming_test.zig   # Flush and Hijack primitives
+│       ├── cookie_multipart_test.zig # Form and Cookie parsing
+│       └── extra_test.zig    # WebSocket, FileServer, and Proxy
 └── src/
     ├── root.zig              # Public package exports (Server, Handler, Mux, etc.)
     ├── server.zig            # Connection listening, Keep-Alive scheduling, timeout enforcement
@@ -41,7 +52,10 @@ zig-server/
     ├── response_writer.zig   # Dual-mode buffering ResponseWriter (Auto Content-Length / Chunked)
     ├── header.zig            # Case-insensitive HeaderMap (order-preserving, multi-value support)
     ├── thread_pool.zig       # Futex-synchronized worker pool (O(1) cursor queue)
-    ├── e2e_test.zig          # End-to-end integration test suite (83 tests)
+    ├── cookie.zig            # Cookie parsing and Set-Cookie serialization
+    ├── multipart.zig         # Multipart form data streaming parser
+    ├── timeout.zig           # Route-level timeout middleware
+    ├── extra/                # High-level ecosystem extensions (ws, fs, proxy)
     └── proto/
         ├── method.zig        # HTTP Method enum and zero-copy string parsing
         ├── status.zig        # HTTP Status Code and status phrase mappings

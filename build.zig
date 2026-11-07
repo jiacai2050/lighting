@@ -14,13 +14,15 @@ pub fn build(b: *std.Build) void {
         .root_module = mod,
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
+    const e2e_mod = b.createModule(.{
+        .root_source_file = b.path("tests/e2e/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    e2e_mod.addImport("lighting", mod);
     const e2e_tests = b.addTest(.{
         .name = "e2e_test",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/e2e_test.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = e2e_mod,
     });
     const run_e2e_tests = b.addRunArtifact(e2e_tests);
 

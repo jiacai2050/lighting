@@ -5,6 +5,9 @@ const Method = @import("proto/method.zig").Method;
 const Version = @import("proto/parser.zig").Version;
 const HeaderMap = @import("header.zig").HeaderMap;
 const BodyReader = @import("proto/chunk_reader.zig").BodyReader;
+const CookieIterator = @import("cookie.zig").CookieIterator;
+const multipart = @import("multipart.zig");
+const MultipartForm = multipart.MultipartForm;
 
 /// URL represents a parsed uniform resource locator (or request URI).
 ///
@@ -485,6 +488,34 @@ pub const Request = struct {
     pub fn query(self: *const Request) !QueryParams {
         return self.url.query(self.arena);
     }
+
+    /// cookie returns the value of the named cookie provided in the request, or null if not found.
+    pub fn cookie(self: *const Request, name: []const u8) ?[]const u8 {
+        var it = self.cookies();
+        while (it.next()) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) {
+                return entry.value;
+            }
+        }
+        return null;
+    }
+
+    /// cookies returns an iterator yielding all name-value pairs from the request's Cookie header.
+    pub fn cookies(self: *const Request) CookieIterator {
+        return .{
+            .raw = self.headers.get("cookie"),
+            .index = 0,
+        };
+    }
+
+    /// multipartForm parses the request body as multipart/form-data with a maximum memory threshold.
+    /// Returns the parsed MultipartForm containing form fields and uploaded files.
+    pub fn multipartForm(self: *Request, max_memory: usize) !MultipartForm {
+        const ct = self.headers.get("content-type") orelse return error.MissingContentType;
+        const boundary = multipart.parseBoundary(ct) orelse return error.MissingBoundary;
+        const body_bytes = try self.readBodyAlloc(max_memory);
+        return multipart.parseMultipart(self.arena, body_bytes, boundary, max_memory);
+    }
 };
 
 test "URL parse and queryParam" {
@@ -646,4 +677,29 @@ test "URL parse absolute-form targets" {
     const url5 = URL.parse("http://example.com/");
     try std.testing.expectEqualStrings("example.com", url5.host.?);
     try std.testing.expectEqualStrings("/", url5.path);
+}
+
+test "Request cookie and cookies methods" {
+    const allocator = std.testing.allocator;
+    var headers = HeaderMap.init(allocator);
+    defer headers.deinit();
+
+    try headers.set("Cookie", "session_token=xyz123; user_pref=\"dark_mode\"; tracking=on");
+
+    var req = Request.init(
+        .GET,
+        "/dashboard",
+        .@"HTTP/1.1",
+        headers,
+        null,
+        null,
+        true,
+        allocator,
+    );
+    defer req.path_values.deinit(allocator);
+
+    try std.testing.expectEqualStrings("xyz123", req.cookie("session_token").?);
+    try std.testing.expectEqualStrings("dark_mode", req.cookie("user_pref").?);
+    try std.testing.expectEqualStrings("on", req.cookie("tracking").?);
+    try std.testing.expect(req.cookie("missing") == null);
 }
