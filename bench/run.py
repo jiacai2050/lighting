@@ -88,6 +88,19 @@ def get_hardware_specs():
                 pass
 
     cores = os.cpu_count() or "Unknown"
+    cores_desc = f"{cores} cores"
+    if system == "Darwin":
+        try:
+            nperf = int(subprocess.check_output(["sysctl", "-n", "hw.nperflevels"], stderr=subprocess.DEVNULL).decode().strip())
+            levels = []
+            for i in range(nperf):
+                name = subprocess.check_output(["sysctl", "-n", f"hw.perflevel{i}.name"], stderr=subprocess.DEVNULL).decode().strip()
+                count = int(subprocess.check_output(["sysctl", "-n", f"hw.perflevel{i}.logicalcpu"], stderr=subprocess.DEVNULL).decode().strip())
+                levels.append(f"{count} {name}")
+            if len(levels) > 1:
+                cores_desc = f"{cores} cores: " + " + ".join(levels)
+        except Exception:
+            pass
 
     mem_str = "Unknown"
     if system == "Darwin":
@@ -123,6 +136,7 @@ def get_hardware_specs():
         "os": os_name,
         "cpu": cpu_model,
         "cores": str(cores),
+        "cores_desc": cores_desc,
         "ram": mem_str,
         "zig": zig_ver,
         "go": go_ver,
@@ -138,7 +152,7 @@ print("================================================================")
 print("           Lighting Benchmark Suite (Zig vs Go vs Rust)         ")
 print("================================================================")
 print(f"OS:          {SPECS['os']}")
-print(f"CPU:         {SPECS['cpu']} ({SPECS['cores']} cores)")
+print(f"CPU:         {SPECS['cpu']} ({SPECS['cores_desc']})")
 print(f"RAM:         {SPECS['ram']}")
 print(f"Port:        {PORT}")
 print(f"Threads:     {THREADS}")
@@ -368,7 +382,7 @@ markdown_content = f"""# Lighting Benchmark Report
 | Item | Specification |
 | :--- | :--- |
 | **OS** | {SPECS['os']} |
-| **CPU** | {SPECS['cpu']} ({SPECS['cores']} cores) |
+| **CPU** | {SPECS['cpu']} ({SPECS['cores_desc']}) |
 | **RAM** | {SPECS['ram']} |
 | **Zig** | {SPECS['zig']} |
 | **Go** | {SPECS['go']} |

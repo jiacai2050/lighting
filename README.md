@@ -82,23 +82,24 @@ Each example in the `examples/` directory is self-contained and demonstrates spe
 
 ---
 
-## Benchmarks
+## Benchmark
 
-Benchmarked on an Apple M2 Pro (12-core) using [wrk](https://github.com/wg/wrk):
+Automated comparative benchmark against Go (`net/http`) and Rust (`actix-web`) with aligned timeout policies (Header Read Timeout: 5s, Connection Idle Timeout: 120s):
 
-```text
-$ wrk -t4 -c50 -d10s -H "Connection: keep-alive" http://127.0.0.1:7000/ping
-Running 10s test @ http://127.0.0.1:7000/ping
-  4 threads and 50 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     1.24ms    1.45ms  20.95ms   87.93%
-    Req/Sec    13.12k     2.97k   22.32k    73.76%
-  527537 requests in 10.10s, 72.95MB read
-Requests/sec:  52208.26
-Transfer/sec:      7.22MB
-```
+*Environment: Debian GNU/Linux 13 (x86_64), Intel i5-8500 (6 cores), 15.4 GB RAM | 4 threads, 50 concurrency, 10s per test, 2s warmup.*
 
-Detailed benchmarking methodologies and comparative charts are available in [docs/benchmark.md](docs/benchmark.md).
+| Framework / Implementation | GET `/ping`<br>*(QPS / P50 / P99)* | GET `/users/{id}`<br>*(QPS / P50 / P99)* | POST `/echo`<br>*(QPS / P50 / P99)* | GET `/files/*`<br>*(QPS / P50 / P99)* | CPU<br>*(Idle / Load)* | Peak Memory<br>*(RSS)* |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Zig (Lighting + zio)** | **333.4k**<br>(**59µs** / 7.52ms) | **329.3k**<br>(**60µs** / 7.44ms) | **289.7k**<br>(**75µs** / 5.89ms) | **321.5k**<br>(**63µs** / 7.34ms) | 0.0% / 304.1% | **6.1 MB** |
+| **Rust (`actix-web`)** | **308.0k**<br>(64µs / 6.71ms) | **285.7k**<br>(70µs / 4.74ms) | **263.5k**<br>(81µs / **3.62ms**) | **276.7k**<br>(76µs / 4.34ms) | 0.0% / 314.9% | 8.0 MB |
+| **Zig (Lighting + std.Io)** | **238.1k**<br>(126µs / **1.84ms**) | **225.3k**<br>(141µs / **2.11ms**) | **209.5k**<br>(152µs / **1.46ms**) | **211.5k**<br>(157µs / **0.86ms**) | 0.0% / 296.9% | 16.4 MB |
+| **Go (`net/http`)** | **172.0k**<br>(195µs / 3.30ms) | **164.9k**<br>(204µs / 3.28ms) | **133.6k**<br>(249µs / 2.71ms) | **158.0k**<br>(212µs / 3.18ms) | 0.0% / 381.8% | 15.8 MB |
+
+* **High Throughput**: Lighting (`zio`) achieves **333k+ QPS** with sub-60µs median latency (P50: 59µs), outperforming Rust `actix-web` and nearly doubling Go `net/http`.
+* **Low Memory**: Peak resident memory stays at **6.1 MB** across 50 concurrent Keep-Alive connections via connection-scoped Arena reuse (`request_arena_retain_limit = 64KB`).
+* **Tail Latency**: Lighting (`std.Io`) maintains rock-solid tail latency (P99: **0.86ms ~ 2.11ms**) across all endpoints.
+
+For full methodology, script details,  see [docs/benchmark.md](docs/benchmark.md).
 
 ---
 
