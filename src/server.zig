@@ -10,6 +10,9 @@ const io_util = @import("proto/io_util.zig");
 pub const ServerOptions = struct {
     handler: Handler,
     header_bytes_max: usize = 8 * 1024,
+    /// Maximum capacity (in bytes) to retain in the per-connection request arena.
+    /// Memory exceeding this high-water mark is freed back to the child allocator on reset.
+    request_arena_retain_limit: usize = 64 * 1024,
     read_timeout_ns: ?u64 = null,
     read_header_timeout_ns: ?u64 = null,
     write_timeout_ns: ?u64 = null,
@@ -167,12 +170,20 @@ pub const Server = struct {
         const conn_buf = self.allocator.alloc(u8, self.options.header_bytes_max) catch return;
         defer self.allocator.free(conn_buf);
 
+        // Connection-scoped request arena with retained capacity across requests
+        var conn_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer conn_arena.deinit();
+
         var buf_len: usize = 0;
         var is_idle: bool = false;
 
         // Keep-Alive connection loop
         while (self.running.load(.acquire)) {
             assert(buf_len <= conn_buf.len);
+
+            // Reset arena capacity for each request with high-water mark protection
+            _ = conn_arena.reset(.{ .retain_with_limit = self.options.request_arena_retain_limit });
+            const req_allocator = conn_arena.allocator();
 
             // 1. First check if complete HTTP headers already reside in buffer (Pipelining support)
             var head_end: ?usize = std.mem.indexOf(u8, conn_buf[0..buf_len], "\r\n\r\n");
@@ -230,11 +241,6 @@ pub const Server = struct {
                 buf_len += n;
                 head_end = std.mem.indexOf(u8, conn_buf[0..buf_len], "\r\n\r\n");
             }
-
-            // Create per-request Arena
-            var arena = std.heap.ArenaAllocator.init(self.allocator);
-            defer arena.deinit();
-            const req_allocator = arena.allocator();
 
             var head = parseRequestHead(req_allocator, conn_buf[0..buf_len]) catch |err| {
                 if (err == error.UnsupportedTransferEncoding) {
@@ -409,3 +415,21 @@ pub const Server = struct {
         }
     }
 };
+
+test "Server request arena high-water mark protection" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const limit: usize = 64 * 1024;
+    const alloc = arena.allocator();
+
+    // Allocate 256 KB (exceeding the 64 KB limit)
+    const big_buf = try alloc.alloc(u8, 256 * 1024);
+    @memset(big_buf, 0xAA);
+    try testing.expect(arena.queryCapacity() >= 256 * 1024);
+
+    // Reset with limit
+    _ = arena.reset(.{ .retain_with_limit = limit });
+    try testing.expect(arena.queryCapacity() <= limit);
+}
