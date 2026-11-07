@@ -65,10 +65,10 @@ flowchart TD
 * The user handler runs to completion.
 
 ### 4. Zero-Heap Response Serialization
-* If the response is $\le 4\text{KB}$, it is formatted entirely inside the stack buffer of `ResponseWriter`.
+* If the response is <= 4KB, it is formatted entirely inside the stack buffer of `ResponseWriter`.
 * Status line, response headers, and body are dispatched in a single vectored write (`writev`).
 
 ### 5. Residual Body Draining & Recycling
-* If the client uploaded an unread body $\le 256\text{KB}$, the server automatically drains residual bytes to keep the socket synchronized.
+* If the client uploaded an unread body <= 256KB, the server automatically drains residual bytes to keep the socket synchronized.
 * Any unread pipelined bytes are shifted to the front of `conn_buf` using `std.mem.copyForwards`.
 * The arena is reset, and the connection waits for the next request.

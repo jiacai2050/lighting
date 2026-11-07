@@ -102,6 +102,11 @@ pub const Status = enum(u16) {
             .http_version_not_supported => "HTTP Version Not Supported",
         };
     }
+
+    /// fromCode converts a numeric HTTP status code into a Status enum value, or null if unrecognized.
+    pub fn fromCode(status_code: u16) ?Status {
+        return std.enums.fromInt(Status, status_code);
+    }
 };
 
 comptime {

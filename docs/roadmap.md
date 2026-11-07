@@ -18,7 +18,7 @@ Lighting provides a solid foundation for HTTP/1.1 services:
 
 ## 2. Feature Parity Matrix
 
-The following table summarizes the differences between Go's standard library and Lighting:
+The following table summarizes the status of Lighting's phased features:
 
 | Capability | Go `net/http` | Lighting Current | Impact / Notes |
 | :--- | :--- | :--- | :--- |
@@ -31,10 +31,10 @@ The following table summarizes the differences between Go's standard library and
 | **Multipart Form** | `req.ParseMultipartForm()` | ✅ `lighting.MultipartForm`, `req.multipartForm()` | Streaming parser for RFC 7578 `multipart/form-data` with disk spilling for file uploads exceeding memory thresholds. |
 | **Reverse Proxy** | `httputil.ReverseProxy` | ✅ `lighting.extra.proxy.ReverseProxy` | Reverse proxy forwarding requests, stripping RFC 9110 hop-by-hop headers, injecting `X-Forwarded-*`, and streaming bodies. |
 | **Route Timeouts** | `http.TimeoutHandler` | ✅ `lighting.timeoutHandler()` | Route-level timeout middleware canceling handler execution and returning 504 Gateway Timeout on overrun. |
+| **HTTP Client** | `http.Client`, `Transport` pool | ✅ `lighting.Client` | High-level HTTP client with `get`, `post`, `postForm`, `do`, `CookieJar`, `ConnPool`, and redirect following. |
 | **Panic Recovery** | `defer recover()` per connection | ⚠️ Errors caught, `@panic` fatal | Handler panics crash the task/process instead of returning HTTP 500; `anyerror` gracefully handled as 500. |
 | **TLS / HTTPS** | `ListenAndServeTLS` | ❌ Not implemented | Requires an external reverse proxy (e.g. Nginx, Caddy) for SSL termination. |
 | **HTTP/2 Support** | Built-in via ALPN negotiation | ❌ HTTP/1.1 only | No multiplexing over a single TCP connection. |
-| **HTTP Client** | `http.Client`, `Transport` pool | ❌ Server only | Focus is currently on server-side architecture. |
 
 ---
 

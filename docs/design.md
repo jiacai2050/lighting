@@ -16,7 +16,7 @@
 ### 1.2 Core Architectural Principles
 1. **API Parity with Go `net/http`**: Provides identical developer experience with `w.writeAll()`, `w.header().set()`, `w.writeHeader()`, `r.pathValue()`, and `ServeMux`.
 2. **Zero-Copy First**: The request line, URL, and header names/values are directly sliced from the underlying socket read buffer without redundant allocations or copies.
-3. **Deterministic Memory Lifecycles**: Each HTTP request is backed by an independent `ArenaAllocator`, performing an $O(1)$ bulk deallocation immediately after request completion to prevent memory fragmentation and leaks.
+3. **Deterministic Memory Lifecycles**: Each HTTP request is backed by an independent `ArenaAllocator`, performing an O(1) bulk deallocation immediately after request completion to prevent memory fragmentation and leaks.
 4. **Kernel-Grade Synchronization with Zero Busy Waiting**: Leverages standard futex synchronization primitives (`std.Io.Mutex` and `std.Io.Condition`), ensuring **0.0% CPU usage** when idling.
 
 ---
@@ -42,7 +42,8 @@ lighting/
 │       ├── concurrency_test.zig # Server lifecycle and workers
 │       ├── streaming_test.zig   # Flush and Hijack primitives
 │       ├── cookie_multipart_test.zig # Form and Cookie parsing
-│       └── extra_test.zig    # WebSocket, FileServer, and Proxy
+│       ├── extra_test.zig    # WebSocket, FileServer, and Proxy
+│       └── client_test.zig   # HTTP client integration tests
 └── src/
     ├── root.zig              # Public package exports (Server, Handler, Mux, etc.)
     ├── server.zig            # Connection listening, Keep-Alive scheduling, timeout enforcement
@@ -55,6 +56,7 @@ lighting/
     ├── cookie.zig            # Cookie parsing and Set-Cookie serialization
     ├── multipart.zig         # Multipart form data streaming parser
     ├── timeout.zig           # Route-level timeout middleware
+    ├── client/               # HTTP client implementation (Client, Request, Response, Transport)
     ├── extra/                # High-level ecosystem extensions (ws, fs, proxy)
     └── proto/
         ├── method.zig        # HTTP Method enum and zero-copy string parsing

@@ -54,8 +54,8 @@ try mux.handleFunc("GET /users/{id}", struct {
 }.handle);
 ```
 
-* `GET /users/42` $\rightarrow$ `id = "42"`
-* `GET /users/42/profile` $\rightarrow$ Does not match this rule (falls through).
+* `GET /users/42` -> `id = "42"`
+* `GET /users/42/profile` -> Does not match this rule (falls through).
 
 ### Multi-Segment Catch-All Wildcards (`{path...}`)
 Captures the remainder of the URL path including slashes:
@@ -69,8 +69,8 @@ try mux.handleFunc("GET /static/{filepath...}", struct {
 }.handle);
 ```
 
-* `GET /static/css/theme.css` $\rightarrow$ `filepath = "css/theme.css"`
-* `GET /static/images/logo.png` $\rightarrow$ `filepath = "images/logo.png"`
+* `GET /static/css/theme.css` -> `filepath = "css/theme.css"`
+* `GET /static/images/logo.png` -> `filepath = "images/logo.png"`
 
 ---
 
@@ -95,7 +95,7 @@ When multiple patterns could match a given request, `ServeMux` selects the most 
 1. **Host-specific** matches take precedence over wildcard host matches.
 2. **Method-specific** matches take precedence over any-method matches.
 3. Path segment precedence:
-   $$\text{Literal Segment} > \text{Single-Segment Wildcard } \{id\} > \text{Catch-All Wildcard } \{path...\}$$
+   `Literal Segment` > `Single-Segment Wildcard {id}` > `Catch-All Wildcard {path...}`
 
 For example, given:
 * `GET /users/admin` (Literal)

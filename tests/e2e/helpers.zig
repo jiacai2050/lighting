@@ -13,16 +13,18 @@ pub fn getTestIo() std.Io {
 
 /// TestServer encapsulates a running server on an ephemeral port.
 pub const TestServer = struct {
-    server: http.Server,
+    server: *http.Server,
     thread: std.Thread,
     port: u16,
+    allocator: std.mem.Allocator,
 
-    pub fn start(allocator: std.mem.Allocator, io: std.Io, options: http.Server.Options) !TestServer {
+    pub fn start(allocator: std.mem.Allocator, io: std.Io, options: http.ServerOptions) !TestServer {
         const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
         const listener = try addr.listen(io, .{ .reuse_address = true });
         const port = listener.socket.address.getPort();
 
-        var server = http.Server.init(allocator, io, options);
+        const server = try allocator.create(http.Server);
+        server.* = http.Server.init(allocator, io, options);
 
         const Runner = struct {
             fn run(s: *http.Server, l: std.Io.net.Server) void {
@@ -30,11 +32,12 @@ pub const TestServer = struct {
             }
         };
 
-        const thread = try std.Thread.spawn(.{}, Runner.run, .{ &server, listener });
+        const thread = try std.Thread.spawn(.{}, Runner.run, .{ server, listener });
         return .{
             .server = server,
             .thread = thread,
             .port = port,
+            .allocator = allocator,
         };
     }
 
@@ -42,6 +45,7 @@ pub const TestServer = struct {
         self.server.shutdown();
         self.thread.join();
         self.server.deinit();
+        self.allocator.destroy(self.server);
     }
 
     pub fn connect(self: *TestServer, io: std.Io) !std.Io.net.Stream {

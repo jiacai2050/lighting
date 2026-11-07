@@ -91,6 +91,6 @@ Hello, alice!
 
 1. **`ServeMux.init(allocator)`**: Creates a decision-tree router with zero-allocation route lookups.
 2. **`handleFunc("GET /route", handlerFn)`**: Binds a stateless function directly to an HTTP method and path pattern.
-3. **`req.pathValue("name")`**: Reads extracted path segments in $O(1)$ time without any string copying or heap allocations.
+3. **`req.pathValue("name")`**: Reads extracted path segments in O(1) time without any string copying or heap allocations.
 4. **`w.writeAll(...)`**: Streams response data into a 4KB stack buffer, flushing directly to the client socket when full or on completion.
 5. **`server.listenAndServe(io, address)`**: Dispatches accepted connections into concurrent `std.Io.Group` tasks managed by the runtime.

@@ -4,6 +4,7 @@
 
 # Getting Started
 - [Overview & Philosophy](getting-started/overview.md)
+- [Comparison with Go](go-comparison.md)
 - [Installation](getting-started/installation.md)
 - [Quick Start](getting-started/quickstart.md)
 
