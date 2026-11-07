@@ -1,10 +1,13 @@
+//! HTTP request body stream reader supporting fixed-length, chunked transfer coding, and trailer verification.
+
 const std = @import("std");
 const io_util = @import("io_util.zig");
 const isValidTokenChar = @import("../header.zig").isValidTokenChar;
 const isValidHeaderValue = @import("../header.zig").isValidHeaderValue;
 
-/// A stream body reader that supports fixed Content-Length reading
-/// and handles reading out of the initial buffer first.
+/// BodyReader wraps an incoming HTTP request stream and provides incremental or complete body reads.
+/// Handles both Content-Length bounded bodies and RFC 9112 chunked transfer codings,
+/// prioritizing unconsumed pre-read bytes from the connection's initial header buffer.
 pub const BodyReader = struct {
     stream: std.Io.net.Stream,
     io: std.Io,
@@ -15,6 +18,7 @@ pub const BodyReader = struct {
     chunk_done: bool = false,
     deadline: std.Io.Timeout = .none,
 
+    /// init initializes a BodyReader over the socket stream and initial pre-read buffer.
     pub fn init(
         stream: std.Io.net.Stream,
         io: std.Io,
@@ -32,6 +36,7 @@ pub const BodyReader = struct {
         };
     }
 
+    /// setReadDeadline sets the absolute deadline or relative timeout for subsequent body socket read operations.
     pub fn setReadDeadline(self: *BodyReader, timeout_ns: ?u64) void {
         if (timeout_ns) |ns| {
             const dur = std.Io.Timeout{ .duration = .{ .raw = .{ .nanoseconds = @intCast(ns) }, .clock = .boot } };
@@ -41,10 +46,13 @@ pub const BodyReader = struct {
         }
     }
 
+    /// setReadTimeout is an alias for setReadDeadline with a nanosecond timeout duration.
     pub fn setReadTimeout(self: *BodyReader, timeout_ns: ?u64) void {
         self.setReadDeadline(timeout_ns);
     }
 
+    /// read reads up to dest.len bytes of the request body into dest.
+    /// Returns the number of bytes read, or 0 on end-of-file (EOF).
     pub fn read(self: *BodyReader, dest: []u8) !usize {
         if (dest.len == 0) return 0;
 
@@ -236,6 +244,9 @@ pub const BodyReader = struct {
         return std.fmt.parseInt(u64, hex_str, 16) catch return error.InvalidChunkSize;
     }
 
+    /// readAllAlloc reads the entire remaining request body into an allocated byte slice.
+    /// Returns error.StreamTooLong if the stream exceeds max_size bytes.
+    /// Caller owns the returned slice and must free it with allocator.
     pub fn readAllAlloc(self: *BodyReader, allocator: std.mem.Allocator, max_size: usize) ![]u8 {
         if (self.remaining_content_length) |rem| {
             if (rem > max_size) return error.StreamTooLong;

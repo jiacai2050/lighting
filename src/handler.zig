@@ -1,20 +1,29 @@
+//! HTTP Handler interface and middleware abstractions conforming to Go's http.Handler model.
+
 const std = @import("std");
 const ResponseWriter = @import("response_writer.zig").ResponseWriter;
 const Request = @import("request.zig").Request;
 
+/// Handler responds to an HTTP request.
+///
+/// Handler is implemented via a type-erased fat pointer (VTable) providing zero runtime
+/// memory overhead and zero allocation cost. It can wrap standalone functions, stateful structs,
+/// or struct methods.
 pub const Handler = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
+    /// VTable defines the virtual function dispatch table for Handler implementations.
     pub const VTable = struct {
         serveHTTP: *const fn (ctx: *anyopaque, w: *ResponseWriter, req: *Request) anyerror!void,
     };
 
+    /// serveHTTP handles the incoming HTTP request by writing headers and body data to w.
     pub fn serveHTTP(self: Handler, w: *ResponseWriter, req: *Request) anyerror!void {
         return self.vtable.serveHTTP(self.ptr, w, req);
     }
 
-    /// Wraps a stateless function pointer as a Handler
+    /// fromFn wraps a stateless function pointer as a Handler.
     pub fn fromFn(comptime func: *const fn (*ResponseWriter, *Request) anyerror!void) Handler {
         const Gen = struct {
             fn call(_: *anyopaque, w: *ResponseWriter, req: *Request) anyerror!void {
@@ -28,7 +37,7 @@ pub const Handler = struct {
         };
     }
 
-    /// Wraps any struct pointer that implements `serveHTTP(*@This(), *ResponseWriter, *Request) anyerror!void`
+    /// from wraps any struct pointer that implements `serveHTTP(*@This(), *ResponseWriter, *Request) anyerror!void`.
     pub fn from(pointer: anytype) Handler {
         const PtrType = @TypeOf(pointer);
         const Pointee = std.meta.Child(PtrType);
@@ -47,7 +56,7 @@ pub const Handler = struct {
         };
     }
 
-    /// Binds any pointer with a member method `fn (*T, *ResponseWriter, *Request) anyerror!void`
+    /// bind binds any struct pointer with any member method `fn (*T, *ResponseWriter, *Request) anyerror!void`.
     pub fn bind(pointer: anytype, comptime method: anytype) Handler {
         const PtrType = @TypeOf(pointer);
         const Pointee = std.meta.Child(PtrType);
@@ -67,10 +76,11 @@ pub const Handler = struct {
     }
 };
 
-/// Standard request logging middleware that records method, path, HTTP status, and latency.
+/// LoggingHandler is a standard request logging middleware that records method, path, HTTP status, and latency.
 pub const LoggingHandler = struct {
     next: Handler,
 
+    /// serveHTTP records request start time, delegates to next handler, and logs the execution outcome.
     pub fn serveHTTP(self: *LoggingHandler, w: *ResponseWriter, req: *Request) anyerror!void {
         const start = std.Io.Clock.awake.now(w.io);
         const method = req.method.asString();
@@ -92,12 +102,13 @@ pub const LoggingHandler = struct {
         return result;
     }
 
+    /// handler returns a Handler interface pointing to this LoggingHandler.
     pub fn handler(self: *LoggingHandler) Handler {
         return Handler.from(self);
     }
 };
 
-/// Middleware function type: wraps a Handler and returns an augmented Handler
+/// MiddlewareFn represents a middleware constructor that wraps a Handler and returns an augmented Handler.
 pub const MiddlewareFn = *const fn (next: Handler) Handler;
 
 test "Handler fromFn and from struct" {

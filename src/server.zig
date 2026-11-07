@@ -1,3 +1,5 @@
+//! HTTP server implementation powered by Zig structured concurrency (`std.Io.Group`).
+
 const std = @import("std");
 const assert = std.debug.assert;
 const Handler = @import("handler.zig").Handler;
@@ -7,19 +9,31 @@ const parseRequestHead = @import("proto/parser.zig").parseRequestHead;
 const BodyReader = @import("proto/chunk_reader.zig").BodyReader;
 const io_util = @import("proto/io_util.zig");
 
+/// ServerOptions configures an HTTP Server instance.
 pub const ServerOptions = struct {
+    /// Root request handler or multiplexer.
     handler: Handler,
+    /// Maximum allowed request header size in bytes (default 8KB). Requests exceeding this limit return 431.
     header_bytes_max: usize = 8 * 1024,
     /// Maximum capacity (in bytes) to retain in the per-connection request arena.
     /// Memory exceeding this high-water mark is freed back to the child allocator on reset.
     request_arena_retain_limit: usize = 64 * 1024,
+    /// Maximum duration (in nanoseconds) allowed for reading the entire request (including body).
     read_timeout_ns: ?u64 = null,
+    /// Maximum duration (in nanoseconds) allowed for reading the request line and headers.
     read_header_timeout_ns: ?u64 = null,
+    /// Maximum duration (in nanoseconds) allowed for writing the response.
     write_timeout_ns: ?u64 = null,
+    /// Maximum idle duration (in nanoseconds) between requests on a keep-alive connection.
     idle_timeout_ns: ?u64 = null,
 };
 
+/// Server represents an HTTP server instance.
+///
+/// It listens for incoming TCP connections and dispatches each connection concurrently
+/// using `std.Io.Group.concurrent`. Active connections are tracked to support graceful shutdown.
 pub const Server = struct {
+    /// ConnNode tracks active socket connections in an intrusive doubly linked list for shutdown signaling.
     pub const ConnNode = struct {
         stream: std.Io.net.Stream,
         prev: ?*ConnNode = null,
@@ -35,6 +49,7 @@ pub const Server = struct {
     active_conns_head: ?*ConnNode = null,
     active_conns_mutex: std.Io.Mutex = .init,
 
+    /// init initializes a new Server instance.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, options: ServerOptions) Server {
         assert(options.header_bytes_max > 0);
         return .{
@@ -47,10 +62,13 @@ pub const Server = struct {
         };
     }
 
+    /// deinit shuts down the server, closing listeners and active connections.
     pub fn deinit(self: *Server) void {
         self.shutdown();
     }
 
+    /// shutdown gracefully shuts down the server without interrupting active handlers immediately.
+    /// It closes the network listener and triggers socket shutdown on all tracked active connections.
     pub fn shutdown(self: *Server) void {
         if (!self.running.swap(false, .acq_rel)) return;
         if (self.listener) |*l| {
@@ -116,6 +134,8 @@ pub const Server = struct {
         node.next = null;
     }
 
+    /// serve accepts incoming connections on the provided listener, creating a concurrent worker
+    /// for each connection. Blocks until shutdown() is called or the listener encounters a fatal error.
     pub fn serve(self: *Server, listener: std.Io.net.Server) !void {
         self.listener = listener;
         self.running.store(true, .release);
@@ -149,6 +169,8 @@ pub const Server = struct {
         }
     }
 
+    /// listenAndServe binds to the specified host and TCP port, then begins accepting connections.
+    /// Blocks until the server is shut down via shutdown() or an unrecoverable error occurs.
     pub fn listenAndServe(self: *Server, host: []const u8, port: u16) !void {
         const addr = try std.Io.net.IpAddress.parseIp4(host, port);
         const listener = try addr.listen(self.io, .{ .reuse_address = true });
@@ -159,6 +181,7 @@ pub const Server = struct {
         server.serveConn(stream);
     }
 
+    /// serveConn processes HTTP/1.x requests on an accepted TCP connection, supporting keep-alive pipelining.
     pub fn serveConn(self: *Server, stream: std.Io.net.Stream) void {
         var close_stream = true;
         defer if (close_stream) stream.close(self.io);

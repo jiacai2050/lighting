@@ -1,18 +1,24 @@
+//! Fast, zero-copy HTTP/1.x request line and header parser conforming to RFC 9112.
+
 const std = @import("std");
 const Method = @import("method.zig").Method;
 const HeaderMap = @import("../header.zig").HeaderMap;
 const isValidTokenChar = @import("../header.zig").isValidTokenChar;
 
+/// Version represents the HTTP protocol version of a request or response.
 pub const Version = enum {
     @"HTTP/1.0",
     @"HTTP/1.1",
 
+    /// parse parses a protocol version string slice (e.g. "HTTP/1.1").
+    /// Returns null if the version is not supported.
     pub fn parse(s: []const u8) ?Version {
         if (std.mem.eql(u8, s, "HTTP/1.1")) return .@"HTTP/1.1";
         if (std.mem.eql(u8, s, "HTTP/1.0")) return .@"HTTP/1.0";
         return null;
     }
 
+    /// asString returns the protocol version as a string literal.
     pub fn asString(self: Version) []const u8 {
         return switch (self) {
             .@"HTTP/1.0" => "HTTP/1.0",
@@ -21,37 +27,64 @@ pub const Version = enum {
     }
 };
 
+/// RequestHead represents the parsed, decoded HTTP request line and headers.
+/// Slices within RequestHead point directly into the caller's request buffer.
 pub const RequestHead = struct {
+    /// HTTP request method (e.g. GET, POST).
     method: Method,
+    /// Raw request target (path and optional query string).
     target: []const u8,
+    /// HTTP protocol version (HTTP/1.0 or HTTP/1.1).
     version: Version,
+    /// Parsed collection of request headers.
     headers: HeaderMap,
+    /// Explicit Content-Length in bytes, if supplied.
     content_length: ?u64 = null,
+    /// True if Transfer-Encoding indicates chunked encoding.
     is_chunked: bool = false,
+    /// Whether the connection should remain open for subsequent requests.
     keep_alive: bool = true,
-    bytes_consumed: usize, // length of request head including final \r\n\r\n
+    /// Number of bytes consumed from the buffer (up to and including \r\n\r\n).
+    bytes_consumed: usize,
 };
 
+/// ParseError represents errors that can occur during request header parsing.
 pub const ParseError = error{
+    /// Buffer does not yet contain the complete \r\n\r\n header terminator.
     Incomplete,
+    /// Unknown or unsupported HTTP method.
     InvalidMethod,
+    /// Invalid request target URI.
     InvalidTarget,
+    /// Unsupported or invalid HTTP version string.
     InvalidVersion,
+    /// Malformed request line syntax.
     InvalidRequestLine,
+    /// Malformed header field name or value syntax.
     InvalidHeader,
+    /// Prohibited whitespace preceding colon in header field.
     InvalidHeaderColonWhitespace,
+    /// Multiple conflicting Host header fields detected.
     DuplicateHostHeader,
+    /// Malformed or negative Content-Length header.
     InvalidContentLength,
+    /// Missing required Host header in HTTP/1.1 request.
     MissingHostHeader,
+    /// Unsupported Transfer-Encoding coding specified.
     UnsupportedTransferEncoding,
+    /// Chunked encoding is not the final transfer coding.
     ChunkedNotFinalTransferEncoding,
+    /// Duplicate chunked transfer coding specified.
     DuplicateChunkedTransferEncoding,
+    /// Malformed Transfer-Encoding header.
     InvalidTransferEncoding,
+    /// Allocation failure while appending header entries.
     OutOfMemory,
 };
 
-/// Parses HTTP/1.x request header from a raw buffer in a zero-copy manner.
-/// Strings point directly into `buffer` whenever possible.
+/// parseRequestHead parses an HTTP/1.x request header from a raw buffer in a zero-copy manner.
+/// Strings in the returned RequestHead borrow directly from `buffer`.
+/// The provided `allocator` is used only for allocating the HeaderMap entry list.
 pub fn parseRequestHead(allocator: std.mem.Allocator, buffer: []const u8) ParseError!RequestHead {
     const end_idx = std.mem.indexOf(u8, buffer, "\r\n\r\n") orelse return error.Incomplete;
     const head_part = buffer[0..end_idx];

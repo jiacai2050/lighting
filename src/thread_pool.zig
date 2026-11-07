@@ -1,6 +1,6 @@
 //! [UNUSED NOW / DEPRECATED]
 //! This custom OS worker thread pool was previously used for dispatching connections.
-//! Lighting now adopts Zig 0.17's native structured concurrency model via `std.Io.Group.concurrent`
+//! Lighting now adopts Zig's native structured concurrency model via `std.Io.Group.concurrent`
 //! (paralleling Go's `go c.serve()`), allowing direct Fiber coroutine scheduling and zero OS thread starvation.
 //! This file is retained temporarily for backward reference and test compatibility.
 

@@ -1,22 +1,34 @@
+//! HTTP request multiplexer matching incoming requests against registered URL patterns per Go 1.22+ routing rules.
+
 const std = @import("std");
 const assert = std.debug.assert;
 const Handler = @import("handler.zig").Handler;
 const ResponseWriter = @import("response_writer.zig").ResponseWriter;
 const Request = @import("request.zig").Request;
 
+/// Segment represents an individual token in a parsed URL path pattern.
 pub const Segment = struct {
+    /// Token literal or parameter name (e.g. "users", "id", or "path").
     s: []const u8,
+    /// True if this segment is a wildcard placeholder (e.g. {id} or {*}).
     wild: bool,
+    /// True if this segment matches multiple path segments (e.g. {path...}).
     multi: bool,
 };
 
+/// Pattern represents a compiled route pattern containing optional method, optional host, and path segments.
 pub const Pattern = struct {
+    /// Raw unparsed pattern string (e.g. "GET example.com/items/{id}").
     str: []const u8,
+    /// Target HTTP method restriction (e.g. "GET"), or null if any method matches.
     method: ?[]const u8 = null,
+    /// Target Host restriction (e.g. "api.example.com"), or null if any host matches.
     host: ?[]const u8 = null,
+    /// Ordered list of path segments.
     segments: []const Segment,
 };
 
+/// MatchResult captures the matched Handler and extracted path parameter values.
 pub const MatchResult = struct {
     handler: Handler,
     pattern: Pattern,
@@ -304,11 +316,14 @@ pub fn parsePattern(allocator: std.mem.Allocator, raw: []const u8) !Pattern {
     };
 }
 
+/// ServeMux is an HTTP request multiplexer that routes incoming requests to handlers
+/// matching registered URL patterns (supporting Go 1.22+ method, host, wildcards, and rest-of-path matchers).
 pub const ServeMux = struct {
     arena: std.heap.ArenaAllocator,
     root: *RoutingNode,
     allocator: std.mem.Allocator,
 
+    /// init initializes an empty ServeMux using the provided allocator.
     pub fn init(gpa: std.mem.Allocator) ServeMux {
         var arena = std.heap.ArenaAllocator.init(gpa);
         const root = arena.allocator().create(RoutingNode) catch unreachable;
@@ -320,13 +335,21 @@ pub const ServeMux = struct {
         };
     }
 
+    /// deinit releases all registered routes and internal routing tree nodes.
     pub fn deinit(self: *ServeMux) void {
         self.arena.deinit();
     }
 
-    /// Register a Go 1.22+ pattern route.
-    /// Syntax: [METHOD ] [HOST]/[PATH]
-    /// Wildcards: {id}, {path...}, {$}, trailing '/'
+    /// handle registers the handler for the given pattern.
+    ///
+    /// Pattern syntax follows Go 1.22+:
+    /// `[METHOD ][HOST]/[PATH]`
+    ///
+    /// Supported wildcards:
+    /// - `{name}`: matches a single non-empty path segment (e.g. `/users/{id}`)
+    /// - `{name...}`: matches one or more remaining path segments (e.g. `/files/{path...}`)
+    /// - `{$}`: matches the exact end of the URL (e.g. `/{$}`)
+    /// - Trailing `/`: matches any path starting with that prefix.
     pub fn handle(self: *ServeMux, pattern: []const u8, h: Handler) !void {
         assert(pattern.len > 0);
         const parsed = try parsePattern(self.arena.allocator(), pattern);
@@ -340,13 +363,13 @@ pub const ServeMux = struct {
         try method_node.addSegments(arena_allocator, parsed.segments, parsed, h);
     }
 
-    /// Convenience helper to register a function pointer
+    /// handleFunc registers a function pointer handler for the given pattern.
     pub fn handleFunc(self: *ServeMux, pattern: []const u8, comptime func: *const fn (*ResponseWriter, *Request) anyerror!void) !void {
         assert(pattern.len > 0);
         try self.handle(pattern, Handler.fromFn(func));
     }
 
-    /// Match a request to a handler with wildcards extracted.
+    /// matchTree matches a request against the routing tree, extracting any wildcard parameter values into matches.
     pub fn matchTree(
         self: *const ServeMux,
         allocator: std.mem.Allocator,
@@ -491,6 +514,8 @@ pub const ServeMux = struct {
         return null;
     }
 
+    /// serveHTTP dispatches the request to the handler whose pattern most closely matches the request URL.
+    /// Returns 405 Method Not Allowed with an Allow header if the path matches other methods.
     pub fn serveHTTP(self: *ServeMux, w: *ResponseWriter, req: *Request) anyerror!void {
         const host = req.url.host orelse req.headers.get("host");
         const method = req.method.asString();
@@ -538,6 +563,7 @@ pub const ServeMux = struct {
         try w.writeAll("404 page not found\n");
     }
 
+    /// handler returns a Handler interface delegating to this ServeMux.
     pub fn handler(self: *ServeMux) Handler {
         return Handler.from(self);
     }

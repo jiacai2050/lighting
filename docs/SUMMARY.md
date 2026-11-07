@@ -17,6 +17,9 @@
 - [Static Files](guide/static-files.md)
 - [WebSocket](guide/websocket.md)
 
+# Reference
+- [API Reference](apidocs.md)
+
 # Internals
 - [Architecture & I/O Flow](internals/architecture.md)
 - [Structured Concurrency](internals/concurrency.md)

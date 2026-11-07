@@ -1,5 +1,8 @@
+//! HTTP request method definitions conforming to RFC 9110 Section 9.
+
 const std = @import("std");
 
+/// Method represents standard HTTP request methods.
 pub const Method = enum {
     GET,
     HEAD,
@@ -11,6 +14,8 @@ pub const Method = enum {
     OPTIONS,
     TRACE,
 
+    /// parse parses a byte slice into a standard HTTP Method.
+    /// Returns null if the method string is unrecognized or not supported.
     pub fn parse(s: []const u8) ?Method {
         if (std.mem.eql(u8, s, "GET")) return .GET;
         if (std.mem.eql(u8, s, "POST")) return .POST;
@@ -24,6 +29,7 @@ pub const Method = enum {
         return null;
     }
 
+    /// asString returns the uppercase string slice representation of the Method.
     pub fn asString(self: Method) []const u8 {
         return @tagName(self);
     }

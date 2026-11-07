@@ -1,6 +1,9 @@
+//! HTTP status code definitions conforming to RFC 9110 Section 15.
+
 const std = @import("std");
 const assert = std.debug.assert;
 
+/// Status represents standard HTTP status codes.
 pub const Status = enum(u16) {
     @"continue" = 100,
     switching_protocols = 101,
@@ -46,10 +49,12 @@ pub const Status = enum(u16) {
     gateway_timeout = 504,
     http_version_not_supported = 505,
 
+    /// code returns the numeric integer value of the HTTP status code (e.g. 200).
     pub fn code(self: Status) u16 {
         return @backingInt(self);
     }
 
+    /// phrase returns the standard RFC 9110 reason phrase for this status code (e.g. "OK", "Not Found").
     pub fn phrase(self: Status) []const u8 {
         return switch (self) {
             .@"continue" => "Continue",

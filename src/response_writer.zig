@@ -1,3 +1,5 @@
+//! HTTP response generation implementing dual-mode buffering, RFC 9110/9112 framing, and socket hijacking.
+
 const std = @import("std");
 const assert = std.debug.assert;
 const Status = @import("proto/status.zig").Status;
@@ -5,6 +7,13 @@ const HeaderMap = @import("header.zig").HeaderMap;
 const io_util = @import("proto/io_util.zig");
 const Version = @import("proto/parser.zig").Version;
 
+/// ResponseWriter coordinates writing an HTTP response back to the client.
+///
+/// It features dual-mode buffering: small responses (< 4KB) are buffered in memory to automatically
+/// determine and emit a `Content-Length` header without chunking. Larger responses or explicit calls to `flush()`
+/// automatically transition to RFC 9112 `Transfer-Encoding: chunked` streaming.
+///
+/// It also supports full socket hijacking (e.g. for WebSockets and SSE).
 pub const ResponseWriter = struct {
     stream: std.Io.net.Stream,
     io: std.Io,
@@ -32,6 +41,7 @@ pub const ResponseWriter = struct {
         assert(@sizeOf(ResponseWriter) <= 8192);
     }
 
+    /// init initializes a ResponseWriter for an incoming connection cycle.
     pub fn init(
         stream: std.Io.net.Stream,
         io: std.Io,
@@ -53,6 +63,7 @@ pub const ResponseWriter = struct {
         };
     }
 
+    /// allowsBody reports whether the given HTTP status allows a message body per RFC 9110 Section 6.4.1.
     pub fn allowsBody(status: Status) bool {
         const code = status.code();
         if (code >= 100 and code < 200) return false;
@@ -60,7 +71,8 @@ pub const ResponseWriter = struct {
         return true;
     }
 
-    /// Format RFC 9110 IMF-fixdate: "Sun, 06 Nov 1994 08:49:37 GMT" (29 bytes)
+    /// formatHttpDate formats a Unix epoch timestamp (seconds) into standard RFC 9110 IMF-fixdate format:
+    /// "Sun, 06 Nov 1994 08:49:37 GMT" (exactly 29 bytes).
     pub fn formatHttpDate(buf: *[29]u8, ts: i64) []const u8 {
         const epoch_sec = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(0, ts)) };
         const day_secs = epoch_sec.getDaySeconds();
@@ -86,25 +98,33 @@ pub const ResponseWriter = struct {
         }) catch unreachable;
     }
 
+    /// setWriteTimeout sets the nanosecond timeout duration for socket write operations.
     pub fn setWriteTimeout(self: *ResponseWriter, timeout_ns: ?u64) void {
         self.write_timeout_ns = timeout_ns;
     }
 
+    /// header returns the HeaderMap of response headers to be sent to the client.
     pub fn header(self: *ResponseWriter) *HeaderMap {
         return &self.headers;
     }
 
+    /// writeHeader sets the HTTP response status code.
+    /// Subsequent calls to writeHeader or setStatus have no effect if headers have already been sent.
     pub fn writeHeader(self: *ResponseWriter, status: Status) void {
         if (!self.header_written) {
             self.status_code = status;
         }
     }
 
+    /// setStatus is an alias for writeHeader.
     pub fn setStatus(self: *ResponseWriter, status: Status) void {
         self.writeHeader(status);
     }
 
-    /// Appends data to internal buffer or flushes chunked
+    /// write writes a slice of data into the HTTP response body.
+    ///
+    /// Data is buffered in memory up to 4KB; once exceeded or flushed,
+    /// headers are emitted and subsequent writes are streamed via chunked transfer coding.
     pub fn write(self: *ResponseWriter, data: []const u8) !usize {
         assert(self.buffer_len <= self.buffer.len);
         if (self.hijacked) return error.AlreadyHijacked;
@@ -165,6 +185,7 @@ pub const ResponseWriter = struct {
         return data.len;
     }
 
+    /// writeAll writes the entire data slice into the response body.
     pub fn writeAll(self: *ResponseWriter, data: []const u8) !void {
         _ = try self.write(data);
     }

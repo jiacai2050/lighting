@@ -38,8 +38,11 @@ run-ws: ## Run the WebSocket chat & echo example server
 run-fs: ## Run the static file server example
 	cd examples/fs && zig build run
 
-docs: ## Build documentation with mdBook
+docs: ## Build documentation with mdBook and Zig API docs
+	zig build docs
 	mdbook build
+	@mkdir -p book/apidocs
+	@cp -r zig-out/docs/* book/apidocs/
 
 docs-serve: ## Serve documentation locally with mdBook
 	mdbook serve --open

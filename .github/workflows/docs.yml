@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - 'docs/**'
+      - 'src/**'
+      - 'build.zig'
       - 'book.toml'
       - '.github/workflows/docs.yml'
   pull_request:
@@ -13,6 +15,8 @@ on:
       - main
     paths:
       - 'docs/**'
+      - 'src/**'
+      - 'build.zig'
       - 'book.toml'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
@@ -33,13 +37,22 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v7
 
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+
       - name: Setup mdBook
         uses: peaceiris/actions-mdbook@v2
         with:
           mdbook-version: 'latest'
 
+      - name: Build API Documentation
+        run: zig build docs
+
       - name: Build with mdBook
         run: mdbook build
+
+      - name: Copy API Documentation to Book
+        run: cp -r zig-out/docs ./book/apidocs
 
       - name: Upload Pages Artifact
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

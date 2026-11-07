@@ -1,3 +1,5 @@
+//! RFC 6455 compliant WebSocket implementation for lighting.
+
 const std = @import("std");
 const ResponseWriter = @import("../../response_writer.zig").ResponseWriter;
 const Request = @import("../../request.zig").Request;
@@ -5,16 +7,31 @@ const handshake = @import("handshake.zig");
 const conn = @import("conn.zig");
 const frame = @import("frame.zig");
 
+/// Active WebSocket connection wrapping a hijacked TCP socket stream.
 pub const Conn = conn.Conn;
+
+/// Configuration options for a WebSocket connection.
 pub const Options = conn.Options;
+
+/// Decoded incoming WebSocket message.
 pub const Message = conn.Message;
+
+/// Message payload type: Text (UTF-8) or Binary.
 pub const MessageType = conn.MessageType;
+
+/// WebSocket frame opcode.
 pub const Opcode = frame.Opcode;
+
+/// Parsed WebSocket frame header.
 pub const FrameHeader = frame.FrameHeader;
+
+/// Errors that can occur during the WebSocket handshake.
 pub const HandshakeError = handshake.HandshakeError;
+
+/// Errors that can occur during frame serialization or deserialization.
 pub const FrameError = frame.FrameError;
 
-/// Upgrades an incoming HTTP request to a WebSocket connection per RFC 6455.
+/// upgrade upgrades an incoming HTTP request to a WebSocket connection per RFC 6455.
 /// Validates handshake headers, sends 101 Switching Protocols, hijacks the underlying socket,
 /// and returns an initialized WebSocket Conn.
 pub fn upgrade(w: *ResponseWriter, req: *Request, options: Options) !Conn {
