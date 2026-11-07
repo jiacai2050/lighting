@@ -17,6 +17,7 @@ pub const TestServer = struct {
     thread: std.Thread,
     port: u16,
     allocator: std.mem.Allocator,
+    io: std.Io,
 
     pub fn start(allocator: std.mem.Allocator, io: std.Io, options: http.ServerOptions) !TestServer {
         const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
@@ -38,15 +39,16 @@ pub const TestServer = struct {
             .thread = thread,
             .port = port,
             .allocator = allocator,
+            .io = io,
         };
     }
 
-    pub fn stop(self: *TestServer) void {
+    pub fn close(self: *TestServer) void {
         self.server.shutdown();
         self.thread.join();
-        self.server.deinit();
         self.allocator.destroy(self.server);
     }
+    pub const stop = close;
 
     pub fn connect(self: *TestServer, io: std.Io) !std.Io.net.Stream {
         const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", self.port);

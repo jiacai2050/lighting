@@ -45,7 +45,9 @@ The table below maps common Go server idioms directly to their Lighting counterp
 | Write Response | `w.Write([]byte("hello"))` | `try w.writeAll("hello");` |
 | Stream Flush | `w.(http.Flusher).Flush()` | `try w.flush();` |
 | Protocol Hijack | `conn, _, _ := w.(http.Hijacker).Hijack()` | `const stream = try w.hijack();` |
-| Listen & Serve | `http.ListenAndServe(":8080", mux)` | `var server = http.Server.init(allocator, io, .{ .handler = mux.handler() });`<br>`try server.listenAndServe(addr);` |
+| Listen & Serve | `http.ListenAndServe(":8080", mux)` | `var server = http.Server.init(allocator, io, .{ .handler = mux.handler() });`<br>`try server.listenAndServe("0.0.0.0", 8080);` |
+| Non-blocking Close | `srv.Close()` | `server.close();` |
+| Graceful Shutdown | `srv.Shutdown(ctx)` | `server.shutdown();` |
 
 ---
 

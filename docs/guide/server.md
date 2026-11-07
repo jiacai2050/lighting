@@ -6,7 +6,7 @@
 
 ## 1. Initializing the Server
 
-`Server.init` takes an allocator, the Zig 0.17 `std.Io` runtime handle, and `ServerOptions`:
+`Server.init` takes an allocator, the Zig `std.Io` runtime handle, and `ServerOptions`:
 
 ```zig
 const http = @import("lighting");
@@ -19,7 +19,6 @@ var server = http.Server.init(allocator, io, .{
     .write_timeout_ns = 10 * std.time.ns_per_s,     // Response flush timeout
     .idle_timeout_ns = 60 * std.time.ns_per_s,      // Keep-alive idle connection timeout
 });
-defer server.deinit();
 ```
 
 ### ServerOptions Reference
@@ -54,7 +53,7 @@ try server.serve(my_listener);
 
 ## 3. Concurrency Model: Structured Concurrency
 
-Unlike traditional multi-threaded servers that pre-allocate a fixed worker thread pool with unbounded queues, Lighting uses **Zig 0.17's `std.Io.Group.concurrent`**:
+Unlike traditional multi-threaded servers that pre-allocate a fixed worker thread pool with unbounded queues, Lighting uses **native `std.Io.Group.concurrent`**:
 1. The main fiber runs the non-blocking `accept` loop.
 2. For each incoming connection, `group.concurrent(io, serveConnWorker, .{ self, stream })` is called.
 3. Each connection executes independently within a lightweight fiber coroutine.
@@ -62,18 +61,31 @@ Unlike traditional multi-threaded servers that pre-allocate a fixed worker threa
 
 ---
 
-## 4. Graceful Shutdown
+## 4. Graceful Shutdown and Lifecycle
 
-Lighting provides built-in graceful shutdown via `server.shutdown()` or `defer server.deinit()`:
+`Server` manages its resources entirely within the execution scope of `serve()`. No manual `deinit()` is required.
+
+Lighting provides two methods to terminate the server (matching Go's `net/http`):
+- `server.close()`: **Non-blocking**. Signals the server to stop accepting new connections and returns immediately (ideal for signal handlers or inside HTTP route handlers).
+- `server.shutdown()`: **Blocking**. Triggers termination and waits until all in-flight requests are completed and `serve()` has completely returned.
 
 ```zig
-// When receiving SIGINT or shutdown signal:
-server.shutdown();
+var server = http.Server.init(allocator, io, .{
+    .handler = mux.handler(),
+});
+
+// Non-blocking exit (e.g. from an HTTP admin endpoint):
+// server.close();
+
+// Blocking graceful shutdown (e.g. from main thread awaiting drain):
+// server.shutdown();
+
+// serve() runs until close() or shutdown() is invoked:
+try server.serve(listener);
 ```
 
 ### Shutdown Workflow:
-1. Atomically sets the server's running status to `false`.
-2. Connects a dummy loopback probe to immediately unblock the accept thread from `accept4` on Linux/macOS.
-3. Closes the listening socket to reject new incoming connections.
-4. Active keep-alive connections complete their in-flight requests and close.
-5. All background tasks in `self.group` are cancelled and awaited, ensuring zero resource leaks.
+1. When `close()` or `shutdown()` is called, an internal atomic signal wakes up the accept loop and marks the server stopped.
+2. In-flight requests are allowed to complete while incoming requests are stopped.
+3. All background connection workers in `self.group` are cancelled and awaited.
+4. `serve()` returns cleanly with all listeners closed and workers joined, unblocking any waiting `shutdown()` call.

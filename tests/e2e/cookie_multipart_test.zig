@@ -36,28 +36,10 @@ test "e2e: Cookie request parsing and Set-Cookie response" {
     defer mux.deinit();
     try mux.handleFunc("/login", cookieHandler);
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    const listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(gpa, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(gpa, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const st = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-    defer {
-        server.shutdown();
-        st.join();
-    }
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    var client = try ts.connect(io);
     defer client.close(io);
 
     const req = "GET /login HTTP/1.1\r\nHost: localhost\r\nCookie: auth_token=secret_jwt_payload; theme=dark\r\nConnection: close\r\n\r\n";
@@ -106,28 +88,10 @@ test "e2e: multipart/form-data upload with text and file" {
     defer mux.deinit();
     try mux.handleFunc("POST /upload", uploadHandler);
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    const listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(gpa, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(gpa, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const st = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-    defer {
-        server.shutdown();
-        st.join();
-    }
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    var client = try ts.connect(io);
     defer client.close(io);
 
     const boundary = "---------------------------974767299852498929531610575";

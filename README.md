@@ -60,7 +60,6 @@ pub fn main(init: std.process.Init) !void {
         .read_header_timeout_ns = 5 * std.time.ns_per_s,  // Slowloris defense
         .idle_timeout_ns = 120 * std.time.ns_per_s,        // Keep-Alive harvest
     });
-    defer server.deinit();
 
     std.log.info("Server listening on http://127.0.0.1:7000...", .{});
     try server.listenAndServe("127.0.0.1", 7000);

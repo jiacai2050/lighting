@@ -58,7 +58,6 @@ pub fn main(init: std.process.Init) !void {
     var server = http.Server.init(allocator, io, .{
         .handler = logging.handler(),
     });
-    defer server.deinit();
 
     std.log.info("WebSocket example server running at http://127.0.0.1:{d}/", .{port});
     std.log.info("Open http://127.0.0.1:{d}/ in your browser to test", .{port});

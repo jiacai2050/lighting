@@ -73,7 +73,6 @@ pub fn main(init: std.process.Init) !void {
         .read_header_timeout_ns = 5 * std.time.ns_per_s,
         .idle_timeout_ns = 120 * std.time.ns_per_s,
     });
-    defer server.deinit();
 
     std.log.info("Zig (Lighting) server listening on http://127.0.0.1:{d} using backend: {s}...", .{ port, io_name });
     try server.listenAndServe("127.0.0.1", port);

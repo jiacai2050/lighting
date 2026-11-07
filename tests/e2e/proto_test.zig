@@ -25,26 +25,10 @@ test "e2e: GET, POST echo, and Keep-Alive" {
         }
     }.handle);
 
-    // Pick an ephemeral port
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    // Run client tests
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    var client_stream = try connect_addr.connect(io, .{ .mode = .stream });
+    var client_stream = try ts.connect(io);
     defer client_stream.close(io);
 
     // 1. Send first request: GET /ping (Keep-Alive)
@@ -85,10 +69,6 @@ test "e2e: GET, POST echo, and Keep-Alive" {
     try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "200 OK") != null);
     try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "content-length: 11") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp_str, "hello-zig17") != null);
-
-    // Stop server and join
-    server.shutdown();
-    server_thread.join();
 }
 
 test "e2e: chunked transfer encoding" {
@@ -109,25 +89,10 @@ test "e2e: chunked transfer encoding" {
         }
     }.handle);
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    server.listener = listener;
-    server.running.store(true, .release);
-
-    const server_thread = try std.Thread.spawn(.{}, struct {
-        fn run(s: *http.Server) void {
-            const stream = s.listener.?.accept(s.io) catch return;
-            s.serveConn(stream);
-        }
-    }.run, .{&server});
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    var client_stream = try connect_addr.connect(io, .{ .mode = .stream });
+    var client_stream = try ts.connect(io);
     defer client_stream.close(io);
 
     const req = "GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
@@ -146,9 +111,6 @@ test "e2e: chunked transfer encoding" {
 
     try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "transfer-encoding: chunked") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp_str, "0\r\n\r\n") != null);
-
-    server.shutdown();
-    server_thread.join();
 }
 
 test "e2e: HTTP pipelining and RFC compliance (400 on missing Host, 204 No Content)" {
@@ -170,30 +132,10 @@ test "e2e: HTTP pipelining and RFC compliance (400 on missing Host, 204 No Conte
         }
     }.handle);
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    server.listener = listener;
-    server.running.store(true, .release);
-
-    const server_thread = try std.Thread.spawn(.{}, struct {
-        fn run(s: *http.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = s.listener.?.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.serveConn(stream);
-            }
-        }
-    }.run, .{&server});
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // 1. Pipelining test: Send two back-to-back requests in one TCP write
     {
@@ -298,9 +240,6 @@ test "e2e: HTTP pipelining and RFC compliance (400 on missing Host, 204 No Conte
         const resp_str = resp_buf[0..total_read];
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "204 No Content") != null);
     }
-
-    server.shutdown();
-    server_thread.join();
 }
 
 test "e2e: HEAD suppression, 204 suppression, Content-Length guards" {
@@ -340,23 +279,10 @@ test "e2e: HEAD suppression, 204 suppression, Content-Length guards" {
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // 1. Verify HEAD suppresses body while emitting Content-Length
     {
@@ -430,8 +356,7 @@ test "e2e: HEAD suppression, 204 suppression, Content-Length guards" {
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "Content-Length: 5") != null);
     }
 
-    server.shutdown();
-    server_thread.join();
+
 }
 
 test "e2e: status 205 and header stripping on bodyless responses" {
@@ -460,23 +385,10 @@ test "e2e: status 205 and header stripping on bodyless responses" {
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // 1. Verify 205 response
     {
@@ -530,8 +442,7 @@ test "e2e: status 205 and header stripping on bodyless responses" {
         try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "transfer-encoding") == null);
     }
 
-    server.shutdown();
-    server_thread.join();
+
 }
 
 test "e2e: HTTP/1.0 request receives HTTP/1.0 status line and no chunked encoding" {
@@ -556,23 +467,10 @@ test "e2e: HTTP/1.0 request receives HTTP/1.0 status line and no chunked encodin
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // 1. Basic HTTP/1.0 request gets HTTP/1.0 status line
     {
@@ -614,8 +512,7 @@ test "e2e: HTTP/1.0 request receives HTTP/1.0 status line and no chunked encodin
         try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "transfer-encoding") == null);
     }
 
-    server.shutdown();
-    server_thread.join();
+
 }
 
 test "e2e: Transfer-Encoding chunked synchronization" {
@@ -632,23 +529,10 @@ test "e2e: Transfer-Encoding chunked synchronization" {
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });
     defer client.close(io);
 
@@ -671,8 +555,7 @@ test "e2e: Transfer-Encoding chunked synchronization" {
     try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "Content-Length:") == null);
     try std.testing.expect(std.mem.indexOf(u8, resp_str, "0\r\n\r\n") != null);
 
-    server.shutdown();
-    server_thread.join();
+
 }
 
 test "e2e: body of exactly 256KB is cleanly drained and retains keep-alive" {
@@ -695,23 +578,10 @@ test "e2e: body of exactly 256KB is cleanly drained and retains keep-alive" {
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });
     defer client.close(io);
 
@@ -759,8 +629,7 @@ test "e2e: body of exactly 256KB is cleanly drained and retains keep-alive" {
     try std.testing.expect(std.mem.indexOf(u8, resp2_str, "200 OK") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp2_str, "second-ok") != null);
 
-    server.shutdown();
-    server_thread.join();
+
 }
 
 test "e2e: chunk reader line boundary exact capacity acceptance" {
@@ -812,23 +681,10 @@ test "e2e: Transfer-Encoding chunked with zero body emits terminal chunk and kee
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });
     defer client.close(io);
 
@@ -869,6 +725,5 @@ test "e2e: Transfer-Encoding chunked with zero body emits terminal chunk and kee
     try std.testing.expect(std.mem.indexOf(u8, resp2_str, "200 OK") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp2_str, "pong-second") != null);
 
-    server.shutdown();
-    server_thread.join();
+
 }

@@ -29,28 +29,10 @@ test "e2e: extra.ws upgrade, echo text, ping-pong, and close" {
         }
     }.handle);
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    const listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-    defer {
-        server.shutdown();
-        server_thread.join();
-    }
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    var client = try ts.connect(io);
     defer client.close(io);
 
     // 1. Send WebSocket handshake request
@@ -162,28 +144,10 @@ test "e2e: extra.ws fragmented message cumulative limit" {
         }
     }.handle);
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    const listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-    defer {
-        server.shutdown();
-        server_thread.join();
-    }
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    var client = try ts.connect(io);
     defer client.close(io);
 
     // 1. Handshake
@@ -260,28 +224,10 @@ test "e2e: extra.ws invalid UTF-8 text message rejection" {
         }
     }.handle);
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    const listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-    defer {
-        server.shutdown();
-        server_thread.join();
-    }
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    var client = try ts.connect(io);
     defer client.close(io);
 
     // 1. Handshake
@@ -344,27 +290,10 @@ test "e2e extra.fs: FileServer serving, caching, ranges, traversal protection, a
 
     try mux.handle("/", fs.handler());
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    const listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-    defer {
-        server.shutdown();
-        server_thread.join();
-    }
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // 1. Full GET for regular file
     {
@@ -734,27 +663,10 @@ test "e2e extra.fs: FileServer serving, caching, ranges, traversal protection, a
 
         try mux_prefix.handle("/", fs_prefix.handler());
 
-        const addr_p = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-        const listener_p = try addr_p.listen(io, .{ .reuse_address = true });
-        const port_p = listener_p.socket.address.getPort();
+        var ts_p = try helpers.TestServer.start(allocator, io, .{ .handler = mux_prefix.handler() });
+        defer ts_p.stop();
 
-        var server_p = http.Server.init(allocator, io, .{
-            .handler = mux_prefix.handler(),
-        });
-        defer server_p.deinit();
-
-        const ServerThreadP = struct {
-            fn run(s: *http.Server, l: std.Io.net.Server) void {
-                s.serve(l) catch {};
-            }
-        };
-        const st_p = try std.Thread.spawn(.{}, ServerThreadP.run, .{ &server_p, listener_p });
-        defer {
-            server_p.shutdown();
-            st_p.join();
-        }
-
-        const connect_p = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port_p);
+        const connect_p = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts_p.port);
 
         // A. /staticfoo must 404 (non-segment match)
         {
@@ -827,27 +739,10 @@ test "e2e: TimeoutHandler normal completion and timeout trigger" {
     try mux.handle("/fast", fast_th.handler());
     try mux.handle("/timeout", slow_th.handler());
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    const listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(gpa, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(gpa, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const st = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-    defer {
-        server.shutdown();
-        st.join();
-    }
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // 1. Fast path -> 200 OK
     {
@@ -928,26 +823,11 @@ test "e2e: extra.proxy ReverseProxy header rewrite and streaming" {
         }
     }.handle;
 
-    const upstream_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    const upstream_listener = try upstream_addr.listen(io, .{ .reuse_address = true });
-    const upstream_port = upstream_listener.socket.address.getPort();
-    const upstream_target_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", upstream_port);
-
-    var upstream_server = http.Server.init(gpa, io, .{
+    var upstream_ts = try helpers.TestServer.start(gpa, io, .{
         .handler = http.Handler.fromFn(upstreamHandler),
     });
-    defer upstream_server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const upstream_st = try std.Thread.spawn(.{}, ServerThread.run, .{ &upstream_server, upstream_listener });
-    defer {
-        upstream_server.shutdown();
-        upstream_st.join();
-    }
+    defer upstream_ts.stop();
+    const upstream_target_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", upstream_ts.port);
 
     // --- 2. Set up ReverseProxy Server ---
     var rev_proxy = http.extra.proxy.reverseProxy(.{
@@ -965,21 +845,11 @@ test "e2e: extra.proxy ReverseProxy header rewrite and streaming" {
     try proxy_mux.handle("/upstream/{filepath...}", rev_proxy.handler());
     try proxy_mux.handle("/dead/{filepath...}", dead_proxy.handler());
 
-    const proxy_bind_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    const proxy_listener = try proxy_bind_addr.listen(io, .{ .reuse_address = true });
-    const proxy_port = proxy_listener.socket.address.getPort();
-    const proxy_connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", proxy_port);
-
-    var proxy_server = http.Server.init(gpa, io, .{
+    var proxy_ts = try helpers.TestServer.start(gpa, io, .{
         .handler = proxy_mux.handler(),
     });
-    defer proxy_server.deinit();
-
-    const proxy_st = try std.Thread.spawn(.{}, ServerThread.run, .{ &proxy_server, proxy_listener });
-    defer {
-        proxy_server.shutdown();
-        proxy_st.join();
-    }
+    defer proxy_ts.stop();
+    const proxy_connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", proxy_ts.port);
 
     // Test 1: Forward GET and verify X-Forwarded-For injection
     {

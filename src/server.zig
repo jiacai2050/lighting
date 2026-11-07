@@ -29,25 +29,21 @@ pub const ServerOptions = struct {
 };
 
 /// Server represents an HTTP server instance.
+/// It uses a concurrent execution model backed by std.Io.Group.
 ///
-/// It listens for incoming TCP connections and dispatches each connection concurrently
-/// using `std.Io.Group.concurrent`. Active connections are tracked to support graceful shutdown.
+/// Thread Safety and Performance:
+/// - True Zero-Lock Architecture: No global mutexes on accept, connection handling, or request routing.
+/// - Self-Contained Scope: All resources and concurrent workers are fully reclaimed upon `serve()` return.
+/// - Graceful Stop & Shutdown: Call `server.close()` for non-blocking exit or `server.shutdown()` to block until drained.
 pub const Server = struct {
-    /// ConnNode tracks active socket connections in an intrusive doubly linked list for shutdown signaling.
-    pub const ConnNode = struct {
-        stream: std.Io.net.Stream,
-        prev: ?*ConnNode = null,
-        next: ?*ConnNode = null,
-    };
-
     allocator: std.mem.Allocator,
     io: std.Io,
     options: ServerOptions,
     group: std.Io.Group = .init,
-    running: std.atomic.Value(bool) = .init(false),
     listener: ?std.Io.net.Server = null,
-    active_conns_head: ?*ConnNode = null,
-    active_conns_mutex: std.Io.Mutex = .init,
+    stopped: std.atomic.Value(bool) = .init(false),
+    stop_event: std.Io.Event = .unset,
+    done_event: std.Io.Event = .unset,
 
     /// init initializes a new Server instance.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, options: ServerOptions) Server {
@@ -57,45 +53,38 @@ pub const Server = struct {
             .io = io,
             .options = options,
             .group = .init,
-            .active_conns_head = null,
-            .active_conns_mutex = .init,
+            .listener = null,
+            .stopped = .init(false),
+            .stop_event = .unset,
+            .done_event = .unset,
         };
     }
 
-    /// deinit shuts down the server, closing listeners and active connections.
-    pub fn deinit(self: *Server) void {
-        self.shutdown();
+    /// close triggers non-blocking termination of the server (matching Go's srv.Close()).
+    /// Safe to call concurrently from any thread or handler.
+    pub fn close(self: *Server) void {
+        self.stop_event.set(self.io);
     }
 
-    /// shutdown gracefully shuts down the server without interrupting active handlers immediately.
-    /// It closes the network listener and triggers socket shutdown on all tracked active connections.
+    /// shutdown gracefully terminates the server and blocks until all in-flight connections
+    /// have completed and serve() has returned (matching Go's srv.Shutdown()).
+    /// Safe to call concurrently from any thread.
     pub fn shutdown(self: *Server) void {
-        if (!self.running.swap(false, .acq_rel)) return;
+        if (!self.isRunning()) return;
+        self.close();
+        self.done_event.waitUncancelable(self.io);
+    }
+
+    /// isRunning reports whether the server is actively accepting connections.
+    pub fn isRunning(self: *const Server) bool {
+        return self.listener != null and !self.stopped.load(.acquire);
+    }
+
+    fn closeListener(self: *Server) void {
         if (self.listener) |*l| {
-            // On Linux, closing a socket does not wake up a thread blocked in accept4().
-            // Connect a loopback dummy probe to wake up the accept thread so it exits promptly.
-            const port = l.socket.address.getPort();
-            if (port != 0) {
-                if (std.Io.net.IpAddress.parseIp4("127.0.0.1", port)) |addr| {
-                    if (addr.connect(self.io, .{ .mode = .stream })) |dummy| {
-                        dummy.close(self.io);
-                    } else |_| {}
-                } else |_| {}
-            }
             l.socket.close(self.io);
             self.listener = null;
         }
-
-        // Interrupt all active connections so workers in blocking read return immediately
-        self.active_conns_mutex.lockUncancelable(self.io);
-        var curr = self.active_conns_head;
-        while (curr) |node| {
-            node.stream.shutdown(self.io, .both) catch |err| {
-                std.log.debug("connection shutdown error during stop: {}", .{err});
-            };
-            curr = node.next;
-        }
-        self.active_conns_mutex.unlock(self.io);
     }
 
     fn writeErrorResponse(stream: std.Io.net.Stream, io: std.Io, comptime response: []const u8) void {
@@ -105,48 +94,54 @@ pub const Server = struct {
         };
     }
 
-    fn registerConnNode(self: *Server, node: *ConnNode) void {
-        self.active_conns_mutex.lockUncancelable(self.io);
-        defer self.active_conns_mutex.unlock(self.io);
-        node.next = self.active_conns_head;
-        node.prev = null;
-        if (self.active_conns_head) |head| {
-            head.prev = node;
-        }
-        self.active_conns_head = node;
-    }
+    /// stopWatcher runs as a background task inside self.group.
+    /// It waits for self.stop_event or group cancellation.
+    ///
+    /// NOTE: We use cancellation-aware `wait(io) catch return;` instead of `waitUncancelable(io)`.
+    /// If serve() exits prematurely due to an unexpected terminal listener error (e.g.
+    /// SocketNotListening or ConnectionAborted), `group.cancel(io)` propagates cancellation.
+    /// A cancellation-aware wait ensures stopWatcher exits immediately rather than hanging
+    /// `group.cancel()` indefinitely.
+    fn stopWatcher(self: *Server) void {
+        self.stop_event.wait(self.io) catch return;
+        self.stopped.store(true, .release);
 
-    fn unregisterConnNode(self: *Server, node: *ConnNode) void {
-        self.active_conns_mutex.lockUncancelable(self.io);
-        defer self.active_conns_mutex.unlock(self.io);
-        if (self.active_conns_head != node and node.prev == null and node.next == null) {
-            return; // Already unregistered
+        // Wake up accept thread by connecting a dummy loopback probe
+        if (self.listener) |l| {
+            const port = l.socket.address.getPort();
+            if (port != 0) {
+                if (std.Io.net.IpAddress.parseIp4("127.0.0.1", port)) |addr| {
+                    if (addr.connect(self.io, .{ .mode = .stream })) |dummy| {
+                        dummy.close(self.io);
+                    } else |_| {}
+                } else |_| {}
+            }
         }
-        if (node.prev) |prev| {
-            prev.next = node.next;
-        } else if (self.active_conns_head == node) {
-            self.active_conns_head = node.next;
-        }
-        if (node.next) |next| {
-            next.prev = node.prev;
-        }
-        node.prev = null;
-        node.next = null;
     }
 
     /// serve accepts incoming connections on the provided listener, creating a concurrent worker
-    /// for each connection. Blocks until shutdown() is called or the listener encounters a fatal error.
+    /// for each connection. Blocks until close() or shutdown() is called or an unrecoverable listener error occurs.
     pub fn serve(self: *Server, listener: std.Io.net.Server) !void {
         self.listener = listener;
-        self.running.store(true, .release);
+        self.stopped.store(false, .release);
+        self.done_event = .unset;
 
         defer {
+            // Cancel and wait for all active connection workers and the stopWatcher.
             self.group.cancel(self.io);
+            // Close the listener socket so the TCP port is freed.
+            self.closeListener();
+            // Signal callers of shutdown() that the server has fully stopped and drained.
+            self.done_event.set(self.io);
         }
 
-        while (self.running.load(.acquire)) {
-            const stream = self.listener.?.accept(self.io) catch |err| {
-                if (!self.running.load(.acquire)) break;
+        try self.group.concurrent(self.io, stopWatcher, .{self});
+
+        while (self.isRunning()) {
+            var active_listener = self.listener orelse break;
+
+            const stream = active_listener.accept(self.io) catch |err| {
+                if (!self.isRunning()) break;
                 // If listener was closed or interrupted, stop
                 switch (err) {
                     error.ConnectionAborted, error.SocketNotListening, error.Canceled => break,
@@ -156,6 +151,11 @@ pub const Server = struct {
                     },
                 }
             };
+
+            if (!self.isRunning()) {
+                stream.close(self.io);
+                break;
+            }
 
             // Dispatch connection concurrently via std.Io.Group
             self.group.concurrent(self.io, serveConnWorker, .{ self, stream }) catch |err| {
@@ -170,7 +170,7 @@ pub const Server = struct {
     }
 
     /// listenAndServe binds to the specified host and TCP port, then begins accepting connections.
-    /// Blocks until the server is shut down via shutdown() or an unrecoverable error occurs.
+    /// Blocks until close() is called or an unrecoverable error occurs.
     pub fn listenAndServe(self: *Server, host: []const u8, port: u16) !void {
         const addr = try std.Io.net.IpAddress.parseIp4(host, port);
         const listener = try addr.listen(self.io, .{ .reuse_address = true });
@@ -185,9 +185,6 @@ pub const Server = struct {
     pub fn serveConn(self: *Server, stream: std.Io.net.Stream) void {
         var close_stream = true;
         defer if (close_stream) stream.close(self.io);
-        var conn_node = ConnNode{ .stream = stream };
-        self.registerConnNode(&conn_node);
-        defer self.unregisterConnNode(&conn_node);
 
         // Allocate a dedicated connection read buffer (e.g. 8KB)
         const conn_buf = self.allocator.alloc(u8, self.options.header_bytes_max) catch return;
@@ -201,7 +198,7 @@ pub const Server = struct {
         var is_idle: bool = false;
 
         // Keep-Alive connection loop
-        while (self.running.load(.acquire)) {
+        while (self.isRunning()) {
             assert(buf_len <= conn_buf.len);
 
             // Reset arena capacity for each request with high-water mark protection
@@ -214,7 +211,7 @@ pub const Server = struct {
             var idle_deadline: ?std.Io.Timeout = null;
 
             while (head_end == null) {
-                if (!self.running.load(.acquire)) return;
+                if (!self.isRunning()) return;
 
                 if (buf_len >= conn_buf.len) {
                     // Exceeded header_bytes_max -> 431 Request Header Fields Too Large
@@ -326,22 +323,6 @@ pub const Server = struct {
                 head.method == .HEAD,
             );
             res.setWriteTimeout(self.options.write_timeout_ns);
-
-            const HijackContext = struct {
-                server: *Server,
-                node: *ConnNode,
-
-                fn unregister(ctx: *anyopaque) void {
-                    const self_ctx: *@This() = @ptrCast(@alignCast(ctx));
-                    self_ctx.server.unregisterConnNode(self_ctx.node);
-                }
-            };
-            var hijack_ctx = HijackContext{
-                .server = self,
-                .node = &conn_node,
-            };
-            res.on_hijack = HijackContext.unregister;
-            res.on_hijack_ctx = &hijack_ctx;
 
             // Invoke Handler (Catch error to avoid crash and isolate 500)
             self.options.handler.serveHTTP(&res, &req) catch |err| {

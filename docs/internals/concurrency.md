@@ -1,6 +1,6 @@
 # Structured Concurrency
 
-Lighting adopts Zig 0.17's native structured concurrency via `std.Io.Group`, aligning directly with Go's `go c.serve()` model while avoiding the pitfalls of unbounded thread pools.
+Lighting adopts native structured concurrency via `std.Io.Group`, aligning directly with Go's `go c.serve()` model while avoiding the pitfalls of unbounded thread pools.
 
 ---
 
@@ -18,8 +18,8 @@ try self.group.concurrent(self.io, serveConnWorker, .{ self, stream });
 ```
 
 ### Advantages of Structured Concurrency:
-1. **Hierarchical Lifecycles**: All running connection tasks belong to `self.group`. When `server.shutdown()` is invoked, calling `self.group.cancel(self.io)` immediately notifies all connection workers.
-2. **Guaranteed Joining**: Awaiting the group guarantees that every connection has completed its shutdown cleanup before `server.deinit()` returns.
+1. **Hierarchical Lifecycles**: All running connection tasks belong to `self.group`. When termination is signaled or `serve()` exits, calling `self.group.cancel(self.io)` immediately notifies all connection workers.
+2. **Guaranteed Joining**: Awaiting the group guarantees that every connection has completed its shutdown cleanup before `serve()` returns.
 3. **No Thread Starvation**: Fibers yield cooperatively to the Zig runtime whenever they wait on network socket reads or writes.
 
 ---

@@ -22,28 +22,10 @@ test "e2e: ResponseWriter.flush streaming delivery" {
         }
     }.handle);
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    const listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-    defer {
-        server.shutdown();
-        server_thread.join();
-    }
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    var client = try ts.connect(io);
     defer client.close(io);
 
     const req = "GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
@@ -126,28 +108,10 @@ test "e2e: ResponseWriter.hijack raw socket takeover" {
         }
     }.handle);
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    const listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-    defer {
-        server.shutdown();
-        server_thread.join();
-    }
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    var client = try ts.connect(io);
     defer client.close(io);
 
     const req = "GET /ws-upgrade HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n";
@@ -206,28 +170,10 @@ test "e2e: ResponseWriter.hijack flushes buffered data before socket takeover" {
         }
     }.handle);
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    const listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-    defer {
-        server.shutdown();
-        server_thread.join();
-    }
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    var client = try ts.connect(io);
     defer client.close(io);
 
     const req = "GET /buffered-hijack HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: proto\r\n\r\n";
@@ -269,28 +215,10 @@ test "e2e: ResponseWriter.hijack fails with CannotFlushBuffer if status forbids 
         }
     }.handle);
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    const listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-    defer {
-        server.shutdown();
-        server_thread.join();
-    }
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    var client = try ts.connect(io);
     defer client.close(io);
 
     const req = "GET /bad-hijack HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";

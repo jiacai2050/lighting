@@ -36,30 +36,10 @@ test "e2e: Go 1.22+ pattern routing with wildcards and 405 Method Not Allowed" {
         }
     }.handle);
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    server.listener = listener;
-    server.running.store(true, .release);
-
-    const server_thread = try std.Thread.spawn(.{}, struct {
-        fn run(s: *http.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = s.listener.?.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.serveConn(stream);
-            }
-        }
-    }.run, .{&server});
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // Test A: Parameter extraction {id}
     {
@@ -130,9 +110,6 @@ test "e2e: Go 1.22+ pattern routing with wildcards and 405 Method Not Allowed" {
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "File: docs/2026/report.pdf") != null);
     }
-
-    server.shutdown();
-    server_thread.join();
 }
 
 test "e2e: Host case-insensitivity and IPv6 routing in live server" {
@@ -148,23 +125,10 @@ test "e2e: Host case-insensitivity and IPv6 routing in live server" {
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // Client sends Host in lowercase with port
     {
@@ -172,7 +136,7 @@ test "e2e: Host case-insensitivity and IPv6 routing in live server" {
         defer client.close(io);
 
         var req_buf: [128]u8 = undefined;
-        const req = try std.fmt.bufPrint(&req_buf, "GET /info HTTP/1.1\r\nHost: myhost.com:{d}\r\nConnection: close\r\n\r\n", .{port});
+        const req = try std.fmt.bufPrint(&req_buf, "GET /info HTTP/1.1\r\nHost: myhost.com:{d}\r\nConnection: close\r\n\r\n", .{ts.port});
         var vec = [1][]const u8{req};
         _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
 
@@ -189,9 +153,6 @@ test "e2e: Host case-insensitivity and IPv6 routing in live server" {
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "myhost-info") != null);
     }
-
-    server.shutdown();
-    server_thread.join();
 }
 
 test "e2e: absolute-form request targets and routing" {
@@ -222,23 +183,10 @@ test "e2e: absolute-form request targets and routing" {
     try mux.handleFunc("/query", Handlers.queryTest);
     try mux.handleFunc("/", Handlers.rootTest);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // 1. Absolute-form target matches host-qualified pattern, ignoring different Host header
     {
@@ -308,9 +256,6 @@ test "e2e: absolute-form request targets and routing" {
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "200 OK") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "root-ok") != null);
     }
-
-    server.shutdown();
-    server_thread.join();
 }
 
 test "e2e: ServeMux route registration conflict returns error.PatternConflict" {

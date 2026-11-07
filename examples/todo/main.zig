@@ -106,7 +106,6 @@ pub fn main(init: std.process.Init) !void {
     var server = http.Server.init(allocator, io, .{
         .handler = logging.handler(),
     });
-    defer server.deinit();
 
     std.log.info("Todo server running at http://127.0.0.1:{d} (SQLite: {s})...", .{ port, db_path });
     try server.listenAndServe("127.0.0.1", port);

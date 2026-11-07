@@ -25,21 +25,12 @@ test "e2e: Server header and idle timeout handling" {
         .read_header_timeout_ns = 50 * std.time.ns_per_ms, // 50ms header timeout
         .idle_timeout_ns = 50 * std.time.ns_per_ms, // 50ms idle timeout
     });
-    server.listener = listener;
-    server.running.store(true, .release);
 
     const server_thread = try std.Thread.spawn(.{}, struct {
-        fn run(s: *http.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = s.listener.?.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.serveConn(stream);
-            }
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
         }
-    }.run, .{&server});
+    }.run, .{ &server, listener });
 
     const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
 
@@ -101,11 +92,11 @@ test "e2e: Server header and idle timeout handling" {
         try std.testing.expectEqual(@as(usize, 0), n2);
     }
 
-    server.shutdown();
+    server.close();
     server_thread.join();
 }
 
-test "e2e: shutdown interrupts idle keep-alive connections without hanging" {
+test "e2e: stop signal interrupts idle keep-alive connections without hanging" {
     const allocator = std.testing.allocator;
     const io = getTestIo();
 
@@ -125,7 +116,6 @@ test "e2e: shutdown interrupts idle keep-alive connections without hanging" {
     var server = http.Server.init(allocator, io, .{
         .handler = mux.handler(),
     });
-    defer server.deinit();
 
     const ServerThread = struct {
         fn run(s: *http.Server, l: std.Io.net.Server) void {
@@ -154,9 +144,9 @@ test "e2e: shutdown interrupts idle keep-alive connections without hanging" {
     }
     try std.testing.expect(std.mem.indexOf(u8, resp_buf[0..total_read], "200 OK") != null);
 
-    // Client stays idle on connection. Server now shuts down.
-    // shutdown() and deinit() MUST unblock the worker and return immediately (not hang indefinitely in join).
-    server.shutdown();
+    // Client stays idle on connection. Server now receives stop signal.
+    // Signaling stop_event MUST unblock the worker and return promptly without hanging.
+    server.close();
     server_thread.join();
 }
 
@@ -173,25 +163,13 @@ test "e2e: worker pool yields idle keep-alive connection when queue has pending 
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
-
-    // Server with only 1 worker thread!
-    var server = http.Server.init(allocator, io, .{
+    var ts = try helpers.TestServer.start(allocator, io, .{
         .handler = mux.handler(),
         .idle_timeout_ns = 5 * std.time.ns_per_s, // long idle timeout: 5s
     });
-    defer server.deinit();
+    defer ts.stop();
 
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // Client 1 connects and sends first request. The only worker is handling Client 1.
     var c1 = try connect_addr.connect(io, .{ .mode = .stream });
@@ -233,9 +211,6 @@ test "e2e: worker pool yields idle keep-alive connection when queue has pending 
         if (std.mem.indexOf(u8, resp_buf2[0..total_read2], "task-done") != null) break;
     }
     try std.testing.expect(std.mem.indexOf(u8, resp_buf2[0..total_read2], "task-done") != null);
-
-    server.shutdown();
-    server_thread.join();
 }
 
 test "e2e: handler error forces Connection: close and prevents connection reuse" {
@@ -251,24 +226,10 @@ test "e2e: handler error forces Connection: close and prevents connection reuse"
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    var client = try ts.connect(io);
     defer client.close(io);
 
     // Send request with Keep-Alive header to failing handler
@@ -295,9 +256,6 @@ test "e2e: handler error forces Connection: close and prevents connection reuse"
     var eof_vec = [1][]u8{&eof_buf};
     const n2 = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &eof_vec } })).net_read).data_len;
     try std.testing.expectEqual(@as(usize, 0), n2);
-
-    server.shutdown();
-    server_thread.join();
 }
 
 test "e2e: truncated body or handler error enforces Connection: close in headers" {
@@ -324,23 +282,10 @@ test "e2e: truncated body or handler error enforces Connection: close in headers
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // Case 1: Truncated body must emit Connection: close, not keep-alive
     {
@@ -389,7 +334,124 @@ test "e2e: truncated body or handler error enforces Connection: close in headers
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "Connection: close") != null);
         try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "connection: keep-alive") == null);
     }
+}
 
+test "e2e: Server graceful exit with slow request prevents use-after-free" {
+    const allocator = std.testing.allocator;
+    const io = getTestIo();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("/slow", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            try w.io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .boot);
+            try w.writeAll("done slow");
+        }
+    }.handle);
+
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    const listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    const server = try allocator.create(http.Server);
+    server.* = http.Server.init(allocator, io, .{
+        .handler = mux.handler(),
+    });
+
+    const server_thread = try std.Thread.spawn(.{}, struct {
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
+        }
+    }.run, .{ server, listener });
+
+    // Connect a client and initiate a slow request
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    const req = "GET /slow HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    var vec = [1][]const u8{req};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+    // Give worker time to accept and enter handler
+    try io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .boot);
+
+    // server.shutdown() blocks until serve() completely exits and all workers complete
     server.shutdown();
+
+    try std.testing.expect(!server.isRunning());
+
+    // Wait for thread to exit
     server_thread.join();
+
+    // Resources released on serve() return
+    allocator.destroy(server);
+}
+
+test "e2e: Server.serve exits cleanly when server.close is called" {
+    const allocator = std.testing.allocator;
+    const io = getTestIo();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    var server = http.Server.init(allocator, io, .{
+        .handler = mux.handler(),
+    });
+
+    const addr1 = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    const listener1 = try addr1.listen(io, .{ .reuse_address = true });
+
+    const server_thread = try std.Thread.spawn(.{}, struct {
+        fn run(s: *http.Server, l: std.Io.net.Server) void {
+            s.serve(l) catch {};
+        }
+    }.run, .{ &server, listener1 });
+
+    try io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .boot);
+    server.close();
+    server_thread.join();
+
+    try std.testing.expect(!server.isRunning());
+}
+
+test "e2e: concurrent serve and stop signal does not cause use-after-free" {
+    const allocator = std.testing.allocator;
+    const io = getTestIo();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    // Run multiple iterations of rapid concurrent serve vs server.close()
+    var iter: usize = 0;
+    while (iter < 30) : (iter += 1) {
+        const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+        const listener = try addr.listen(io, .{ .reuse_address = true });
+
+        const server = try allocator.create(http.Server);
+        server.* = http.Server.init(allocator, io, .{
+            .handler = mux.handler(),
+        });
+
+        const ServeTask = struct {
+            fn run(s: *http.Server, l: std.Io.net.Server) void {
+                s.serve(l) catch {};
+            }
+        };
+
+        const StopTask = struct {
+            fn run(s: *http.Server) void {
+                s.close();
+            }
+        };
+
+        const t_serve = try std.Thread.spawn(.{}, ServeTask.run, .{ server, listener });
+        const t_stop = try std.Thread.spawn(.{}, StopTask.run, .{server});
+
+        t_serve.join();
+        t_stop.join();
+
+        allocator.destroy(server);
+    }
 }

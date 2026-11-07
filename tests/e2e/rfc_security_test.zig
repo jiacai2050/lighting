@@ -17,31 +17,13 @@ test "e2e: 431 header too large and 500 internal server error" {
         }
     }.handle);
 
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
-
-    var server = http.Server.init(allocator, io, .{
+    var ts = try helpers.TestServer.start(allocator, io, .{
         .handler = mux.handler(),
         .header_bytes_max = 256, // small limit to easily test 431
     });
-    server.listener = listener;
-    server.running.store(true, .release);
+    defer ts.stop();
 
-    const server_thread = try std.Thread.spawn(.{}, struct {
-        fn run(s: *http.Server) void {
-            while (s.running.load(.acquire)) {
-                const stream = s.listener.?.accept(s.io) catch break;
-                if (!s.running.load(.acquire)) {
-                    stream.close(s.io);
-                    break;
-                }
-                s.serveConn(stream);
-            }
-        }
-    }.run, .{&server});
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // 1. Test 500 error isolation
     {
@@ -91,9 +73,6 @@ test "e2e: 431 header too large and 500 internal server error" {
 
         try std.testing.expect(std.ascii.findIgnoreCase(resp_str, "431 Request Header Fields Too Large") != null);
     }
-
-    server.shutdown();
-    server_thread.join();
 }
 
 test "e2e: RFC 9112 strict request line, headers, and Transfer-Encoding" {
@@ -171,26 +150,13 @@ test "e2e: monotonic read deadline stops Slow Post trickle" {
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
-
-    // read_timeout_ns = 150ms
-    var server = http.Server.init(allocator, io, .{
+    var ts = try helpers.TestServer.start(allocator, io, .{
         .handler = mux.handler(),
         .read_timeout_ns = 150 * std.time.ns_per_ms,
     });
-    defer server.deinit();
+    defer ts.stop();
 
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    var client = try connect_addr.connect(io, .{ .mode = .stream });
+    var client = try ts.connect(io);
     defer client.close(io);
 
     // Send header announcing Content-Length: 10
@@ -211,9 +177,6 @@ test "e2e: monotonic read deadline stops Slow Post trickle" {
     var resp_buf: [512]u8 = undefined;
     var r_vec = [1][]u8{&resp_buf};
     _ = io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } }) catch {};
-
-    server.shutdown();
-    server_thread.join();
 }
 
 test "e2e: duplicate chunked and forbidden chunk trailers rejected" {
@@ -230,23 +193,10 @@ test "e2e: duplicate chunked and forbidden chunk trailers rejected" {
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // 1. Duplicate chunked transfer encoding rejected with 400 Bad Request
     {
@@ -291,8 +241,7 @@ test "e2e: duplicate chunked and forbidden chunk trailers rejected" {
         try std.testing.expect(std.mem.indexOf(u8, resp_buf[0..total_read], "500 Internal Server Error") != null or total_read == 0);
     }
 
-    server.shutdown();
-    server_thread.join();
+
 }
 
 test "e2e: RFC 9112 request-target rejection in live server" {
@@ -309,23 +258,10 @@ test "e2e: RFC 9112 request-target rejection in live server" {
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
 
     // 1. GET * is rejected with 400 Bad Request
     {
@@ -372,8 +308,7 @@ test "e2e: RFC 9112 request-target rejection in live server" {
         try std.testing.expect(std.mem.indexOf(u8, resp_str, "Allow: GET, POST, OPTIONS") != null);
     }
 
-    server.shutdown();
-    server_thread.join();
+
 }
 
 test "e2e: invalid Content-Length is rejected" {
@@ -390,23 +325,10 @@ test "e2e: invalid Content-Length is rejected" {
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });
     defer client.close(io);
 
@@ -427,8 +349,7 @@ test "e2e: invalid Content-Length is rejected" {
     try std.testing.expect(std.mem.indexOf(u8, resp_str, "500 Internal Server Error") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp_str, "not_a_number") == null);
 
-    server.shutdown();
-    server_thread.join();
+
 }
 
 test "e2e: Date header is generated and complies with RFC 9110" {
@@ -444,23 +365,10 @@ test "e2e: Date header is generated and complies with RFC 9110" {
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });
     defer client.close(io);
 
@@ -481,8 +389,7 @@ test "e2e: Date header is generated and complies with RFC 9110" {
     try std.testing.expect(std.mem.indexOf(u8, resp_str, "Date: ") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp_str, " GMT\r\n") != null);
 
-    server.shutdown();
-    server_thread.join();
+
 }
 
 test "e2e: Expect: 100-continue is properly handled" {
@@ -501,23 +408,10 @@ test "e2e: Expect: 100-continue is properly handled" {
         }
     }.handle);
 
-    const listen_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try listen_addr.listen(io, .{ .reuse_address = true });
-    const port = listener.socket.address.getPort();
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
 
-    var server = http.Server.init(allocator, io, .{
-        .handler = mux.handler(),
-    });
-    defer server.deinit();
-
-    const ServerThread = struct {
-        fn run(s: *http.Server, l: std.Io.net.Server) void {
-            s.serve(l) catch {};
-        }
-    };
-    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{ &server, listener });
-
-    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", ts.port);
     var client = try connect_addr.connect(io, .{ .mode = .stream });
     defer client.close(io);
 
@@ -550,6 +444,5 @@ test "e2e: Expect: 100-continue is properly handled" {
     try std.testing.expect(std.mem.indexOf(u8, final_str, "200 OK") != null);
     try std.testing.expect(std.mem.indexOf(u8, final_str, "hello-expect") != null);
 
-    server.shutdown();
-    server_thread.join();
+
 }

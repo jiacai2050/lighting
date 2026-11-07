@@ -54,7 +54,6 @@ pub fn main(init: std.process.Init) !void {
     var server = http.Server.init(allocator, io, .{
         .handler = logging.handler(),
     });
-    defer server.deinit();
 
     std.log.info("File server serving '{s}' on http://127.0.0.1:{d}...", .{ root_dir, port });
     try server.listenAndServe("127.0.0.1", port);

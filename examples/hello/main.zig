@@ -31,7 +31,6 @@ pub fn main(init: std.process.Init) !void {
     var server = http.Server.init(allocator, io, .{
         .handler = logging.handler(),
     });
-    defer server.deinit();
 
     std.log.info("Hello server listening on http://127.0.0.1:{d}...", .{port});
     try server.listenAndServe("127.0.0.1", port);

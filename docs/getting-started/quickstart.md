@@ -46,7 +46,6 @@ pub fn main(init: std.process.Init) !void {
         .read_timeout_ns = 5 * std.time.ns_per_s,
         .write_timeout_ns = 5 * std.time.ns_per_s,
     });
-    defer server.deinit();
 
     std.debug.print("🚀 Lighting web server running at http://127.0.0.1:8080\n", .{});
     try server.listenAndServe("127.0.0.1", 8080);
@@ -93,4 +92,4 @@ Hello, alice!
 2. **`handleFunc("GET /route", handlerFn)`**: Binds a stateless function directly to an HTTP method and path pattern.
 3. **`req.pathValue("name")`**: Reads extracted path segments in O(1) time without any string copying or heap allocations.
 4. **`w.writeAll(...)`**: Streams response data into a 4KB stack buffer, flushing directly to the client socket when full or on completion.
-5. **`server.listenAndServe(io, address)`**: Dispatches accepted connections into concurrent `std.Io.Group` tasks managed by the runtime.
+5. **`server.listenAndServe(host, port)`**: Dispatches accepted connections into concurrent `std.Io.Group` tasks managed by the runtime.
