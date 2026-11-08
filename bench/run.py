@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import platform
 import re
+import glob
+from collections import defaultdict
 from datetime import datetime
 
 # -----------------------------------------------------------------------------
@@ -29,12 +31,108 @@ REPORT_FILE = os.environ.get("REPORT_FILE", os.path.join(REPORT_DIR, f"benchmark
 REPORT_LATEST = os.path.join(REPORT_DIR, "latest.md")
 
 # -----------------------------------------------------------------------------
-# Prerequisites
+# Prerequisites & CPU Isolation
 # -----------------------------------------------------------------------------
 for cmd in ["wrk", "curl"]:
     if not shutil.which(cmd):
         print(f"Error: '{cmd}' is required but not installed.", file=sys.stderr)
         sys.exit(1)
+
+def parse_cpulist(s):
+    cpus = set()
+    for part in s.strip().split(','):
+        if not part:
+            continue
+        if '-' in part:
+            lo, hi = map(int, part.split('-'))
+            cpus.update(range(lo, hi + 1))
+        else:
+            cpus.add(int(part))
+    return cpus
+
+FREQ_MAP = {}
+CORE_CPUS = set()
+ATOM_CPUS = set()
+
+if platform.system() == "Linux":
+    for p in glob.glob('/sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_max_freq'):
+        m = re.search(r'cpu(\d+)', p)
+        if m:
+            try:
+                with open(p) as f:
+                    FREQ_MAP[int(m.group(1))] = int(f.read().strip())
+            except Exception:
+                pass
+    if os.path.exists('/sys/devices/cpu_core/cpus'):
+        try:
+            with open('/sys/devices/cpu_core/cpus') as f:
+                CORE_CPUS = parse_cpulist(f.read())
+        except Exception:
+            pass
+    if os.path.exists('/sys/devices/cpu_atom/cpus'):
+        try:
+            with open('/sys/devices/cpu_atom/cpus') as f:
+                ATOM_CPUS = parse_cpulist(f.read())
+        except Exception:
+            pass
+
+def describe_cores(cores_str):
+    if not cores_str:
+        return "None"
+    cpus = parse_cpulist(cores_str)
+    if not cpus:
+        return f"`{cores_str}`"
+    freqs = [FREQ_MAP.get(c) for c in cpus if c in FREQ_MAP]
+    max_freq = f"{max(freqs)/1e6:.1f} GHz" if freqs else None
+
+    core_type = ""
+    if CORE_CPUS and cpus.issubset(CORE_CPUS):
+        core_type = "Performance P-core"
+    elif ATOM_CPUS and cpus.issubset(ATOM_CPUS):
+        if freqs and max(freqs) < 3.0e6:
+            core_type = "Low Power LP E-core"
+        else:
+            core_type = "Efficiency E-core"
+
+    desc_parts = []
+    if core_type:
+        desc_parts.append(core_type)
+    if max_freq:
+        desc_parts.append(f"up to {max_freq}")
+
+    if desc_parts:
+        return f"`{cores_str}` ({', '.join(desc_parts)})"
+    return f"`{cores_str}`"
+
+def get_cpu_affinity():
+    if os.environ.get("PIN_CORES", "1") == "0":
+        return None, None
+    if platform.system() != "Linux" or not shutil.which("taskset"):
+        return None, None
+
+    server_cores = os.environ.get("SERVER_CORES")
+    client_cores = os.environ.get("CLIENT_CORES")
+    if server_cores and client_cores:
+        return server_cores, client_cores
+
+    if CORE_CPUS and ATOM_CPUS:
+        s_cores = server_cores or f"{min(CORE_CPUS)}-{max(CORE_CPUS)}"
+        sorted_atoms = sorted(list(ATOM_CPUS))
+        c_cores = client_cores or (f"{sorted_atoms[0]}-{sorted_atoms[min(3, len(sorted_atoms)-1)]}")
+        return s_cores, c_cores
+
+    cpu_count = os.cpu_count() or 1
+    if cpu_count >= 8:
+        s_cores = server_cores or "0-7"
+        c_cores = client_cores or f"8-{min(11, cpu_count - 1)}"
+        return s_cores, c_cores
+
+    return server_cores, client_cores
+
+SERVER_CORES, CLIENT_CORES = get_cpu_affinity()
+if SERVER_CORES or CLIENT_CORES:
+    print(f"[*] CPU Core Pinning Active: Server -> taskset -c {describe_cores(SERVER_CORES)}, wrk -> taskset -c {describe_cores(CLIENT_CORES)}")
+
 
 # -----------------------------------------------------------------------------
 # Hardware Specification Collection
@@ -97,6 +195,77 @@ def get_hardware_specs():
                 name = subprocess.check_output(["sysctl", "-n", f"hw.perflevel{i}.name"], stderr=subprocess.DEVNULL).decode().strip()
                 count = int(subprocess.check_output(["sysctl", "-n", f"hw.perflevel{i}.logicalcpu"], stderr=subprocess.DEVNULL).decode().strip())
                 levels.append(f"{count} {name}")
+            if len(levels) > 1:
+                cores_desc = f"{cores} cores: " + " + ".join(levels)
+        except Exception:
+            pass
+    elif system == "Linux":
+        try:
+            levels = []
+            if CORE_CPUS and ATOM_CPUS:
+                atom_freqs = defaultdict(int)
+                for c in ATOM_CPUS:
+                    atom_freqs[FREQ_MAP.get(c, 0)] += 1
+                levels.append(f"{len(CORE_CPUS)} Performance")
+                if len(atom_freqs) > 1:
+                    sorted_atom = sorted(atom_freqs.items(), key=lambda x: x[0], reverse=True)
+                    levels.append(f"{sorted_atom[0][1]} Efficiency")
+                    for _, count in sorted_atom[1:]:
+                        levels.append(f"{count} Low Power Efficiency")
+                else:
+                    levels.append(f"{len(ATOM_CPUS)} Efficiency")
+
+            if not levels and FREQ_MAP:
+                freq_groups = defaultdict(int)
+                for _, freq in FREQ_MAP.items():
+                    freq_groups[freq] += 1
+                if len(freq_groups) > 1:
+                    sorted_freqs = sorted(freq_groups.items(), key=lambda x: x[0], reverse=True)
+                    levels.append(f"{sorted_freqs[0][1]} Performance")
+                    levels.append(f"{sorted_freqs[1][1]} Efficiency")
+                    for _, count in sorted_freqs[2:]:
+                        levels.append(f"{count} Low Power Efficiency")
+
+            if not levels:
+                cap_map = {}
+                for p in glob.glob('/sys/devices/system/cpu/cpu[0-9]*/cpu_capacity'):
+                    m = re.search(r'cpu(\d+)', p)
+                    if m:
+                        try:
+                            with open(p) as f:
+                                cap_map[int(m.group(1))] = int(f.read().strip())
+                        except Exception:
+                            pass
+                if cap_map:
+                    cap_groups = defaultdict(int)
+                    for _, cap in cap_map.items():
+                        cap_groups[cap] += 1
+                    if len(cap_groups) > 1:
+                        sorted_caps = sorted(cap_groups.items(), key=lambda x: x[0], reverse=True)
+                        levels.append(f"{sorted_caps[0][1]} Performance")
+                        for _, count in sorted_caps[1:]:
+                            levels.append(f"{count} Efficiency")
+
+            if not levels:
+                try:
+                    out = subprocess.check_output(['lscpu', '-e=CPU,MAXMHZ'], stderr=subprocess.DEVNULL).decode()
+                    lscpu_freqs = defaultdict(int)
+                    for line in out.strip().splitlines()[1:]:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            try:
+                                lscpu_freqs[float(parts[1])] += 1
+                            except ValueError:
+                                pass
+                    if len(lscpu_freqs) > 1:
+                        sorted_lf = sorted(lscpu_freqs.items(), key=lambda x: x[0], reverse=True)
+                        levels.append(f"{sorted_lf[0][1]} Performance")
+                        levels.append(f"{sorted_lf[1][1]} Efficiency")
+                        for _, count in sorted_lf[2:]:
+                            levels.append(f"{count} Low Power Efficiency")
+                except Exception:
+                    pass
+
             if len(levels) > 1:
                 cores_desc = f"{cores} cores: " + " + ".join(levels)
         except Exception:
@@ -238,6 +407,8 @@ def run_wrk(url, duration, lua_script=None):
     if lua_script:
         cmd.extend(["-s", lua_script])
     cmd.append(url)
+    if CLIENT_CORES:
+        cmd = ["taskset", "-c", CLIENT_CORES] + cmd
 
     out = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode("utf-8", errors="replace")
 
@@ -274,9 +445,13 @@ def bench_target(name, bin_path, env_extra=None):
         env.update(env_extra)
 
     desc = f" ({env_extra})" if env_extra else ""
-    print(f">>> Testing {name}{desc}...")
+    pin_info = f" [taskset -c {SERVER_CORES}]" if SERVER_CORES else ""
+    print(f">>> Testing {name}{desc}{pin_info}...")
 
-    proc = subprocess.Popen([bin_path], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    server_cmd = [bin_path]
+    if SERVER_CORES:
+        server_cmd = ["taskset", "-c", SERVER_CORES] + server_cmd
+    proc = subprocess.Popen(server_cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         wait_ready(PORT)
 
@@ -293,8 +468,11 @@ def bench_target(name, bin_path, env_extra=None):
         idle_rss = get_rss_mb(proc.pid)
 
         # Warmup
+        warmup_cmd = ["wrk", f"-t{THREADS}", f"-c{CONCURRENCY}", f"-d{WARMUP_DURATION}", "-H", "Connection: keep-alive", f"http://127.0.0.1:{PORT}/ping"]
+        if CLIENT_CORES:
+            warmup_cmd = ["taskset", "-c", CLIENT_CORES] + warmup_cmd
         subprocess.call(
-            ["wrk", f"-t{THREADS}", f"-c{CONCURRENCY}", f"-d{WARMUP_DURATION}", "-H", "Connection: keep-alive", f"http://127.0.0.1:{PORT}/ping"],
+            warmup_cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -373,6 +551,24 @@ for t in targets:
     row = f"| **{t}** | {p['qps']} req/s ({p['p50']} / {p['p99']}) | {u['qps']} req/s ({u['p50']} / {u['p99']}) | {e['qps']} req/s ({e['p50']} / {e['p99']}) | {f['qps']} req/s ({f['p50']} / {f['p99']}) | {d['cpu']} | {d['rss']} |"
     table_rows.append(row)
 
+pinning_note = ""
+if SERVER_CORES or CLIENT_CORES:
+    server_desc = describe_cores(SERVER_CORES)
+    client_desc = describe_cores(CLIENT_CORES)
+    pinning_note = f"""
+> [!NOTE]
+> **CPU Core Pinning & Topology Allocation Active**:
+> - **Server**: Bound to {server_desc} via `taskset -c {SERVER_CORES or 'None'}`
+> - **Client (wrk)**: Bound to {client_desc} via `taskset -c {CLIENT_CORES or 'None'}`
+> Separates server processing onto maximum-frequency cores while isolating client load generation onto independent cores to eliminate scheduling jitter and prevent cross-die latency penalties.
+"""
+
+cpu_pinning_desc = (
+    f"Server: {describe_cores(SERVER_CORES)} / Client: {describe_cores(CLIENT_CORES)}"
+    if (SERVER_CORES or CLIENT_CORES)
+    else "None (OS managed / unpinned)"
+)
+
 markdown_content = f"""# Lighting Benchmark Report
 
 **Date**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -397,7 +593,8 @@ markdown_content = f"""# Lighting Benchmark Report
 | **Concurrency** | {CONCURRENCY} |
 | **Duration** | {DURATION} per test |
 | **Warmup** | {WARMUP_DURATION} |
-
+| **CPU Pinning** | {cpu_pinning_desc} |
+{pinning_note}
 ## Benchmark Results
 
 {table_header}
@@ -412,6 +609,8 @@ shutil.copyfile(REPORT_FILE, REPORT_LATEST)
 print("================================================================================")
 print("                             Benchmark Results                                  ")
 print("================================================================================")
+if SERVER_CORES or CLIENT_CORES:
+    print(f"[*] CPU Core Pinning: Server -> taskset -c {describe_cores(SERVER_CORES)}, wrk -> taskset -c {describe_cores(CLIENT_CORES)}")
 print("")
 print(table_header)
 print(table_sep)

@@ -40,6 +40,27 @@ To guarantee an apples-to-apples comparison, connection and request timeout conf
 
 ---
 
+## CPU Isolation & Core Pinning Strategy
+
+On modern Linux architectures featuring heterogeneous CPU clusters (e.g., Intel Core Ultra / Meteor Lake with P-cores, E-cores, and LP E-cores on separate SOC dies), running unpinned benchmarks results in unpredictable CFS thread migrations. If a server event loop thread wanders onto a low-frequency LP E-core without shared L3 cache, head-of-line blocking can degrade throughput by up to 5x.
+
+To eliminate scheduling noise and guarantee scientific reproducibility, `bench/run.py` implements **automatic hardware topology detection and core isolation via `taskset`**:
+
+1. **Topology Detection**: Inspects `/sys/devices/cpu_core/cpus` and `/sys/devices/cpu_atom/cpus` (or frequency clusters).
+2. **Dedicated Server Cores**: The HTTP server under test is automatically pinned to the Performance cores (`taskset -c 0-7` by default).
+3. **Dedicated Client Cores**: The `wrk` load generator is pinned to independent, non-overlapping cores (`taskset -c 8-11` by default), completely isolating client-side generation load from server-side request processing.
+4. **Driver & Scheduling Defaults**: On Linux, `bench/zig/build.zig` defaults to `zio`'s native `io_uring` backend with `work_stealing` scheduler, which delivers peak throughput (~710k+ QPS on dedicated P-cores).
+
+### Core Pinning Controls
+
+| Environment Variable | Default Behavior | Description |
+| :--- | :--- | :--- |
+| `SERVER_CORES` | Auto-detected P-cores (e.g. `0-7`) | Explicit CPU core list for the server process (`taskset -c <SERVER_CORES>`). |
+| `CLIENT_CORES` | Auto-detected E-cores (e.g. `8-11`) | Explicit CPU core list for `wrk` load generation (`taskset -c <CLIENT_CORES>`). |
+| `PIN_CORES` | `1` (on Linux with `taskset`) | Set `PIN_CORES=0` to disable core pinning and run under default OS scheduler. |
+
+---
+
 ## Directory Structure
 
 ```
@@ -103,8 +124,11 @@ The script will:
 ```bash
 cd bench/zig
 
-# Run with lalinsky/zio runtime (default)
+# Run with lalinsky/zio runtime (defaults to io_uring + work_stealing on Linux)
 IO=zio zig build run -Doptimize=ReleaseFast
+
+# Optional: Override zio event loop backend or scheduling discipline
+IO=zio zig build run -Doptimize=ReleaseFast -Dbackend=epoll -Dscheduling=pinned
 
 # Or run with Zig standard library std.Io
 IO=std zig build run -Doptimize=ReleaseFast

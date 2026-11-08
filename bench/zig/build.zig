@@ -8,9 +8,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const backend = b.option([]const u8, "backend", "Override zio event loop backend");
+    const scheduling = b.option([]const u8, "scheduling", "Override zio scheduling discipline");
+
     const zio = b.dependency("zio", .{
         .target = target,
         .optimize = optimize,
+        .backend = backend,
+        .scheduling = scheduling,
     });
 
     const exe = b.addExecutable(.{

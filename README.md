@@ -85,20 +85,21 @@ Each example in the `examples/` directory is self-contained and demonstrates spe
 
 Automated comparative benchmark against Go (`net/http`) and Rust (`actix-web`) with aligned timeout policies (Header Read Timeout: 5s, Connection Idle Timeout: 120s):
 
-*Environment: Debian GNU/Linux 13 (x86_64), Intel i5-8500 (6 cores), 15.4 GB RAM | 4 threads, 50 concurrency, 10s per test, 2s warmup.*
+*Environment: Debian GNU/Linux 13 (x86_64), Intel Core Ultra 5 125H (18 cores: 8P + 8E + 2LP-E), 15.1 GB RAM | 4 threads, 50 concurrency, 10s per test, 2s warmup.*
+*CPU Pinning: Server on `0-7` (Performance P-core, up to 4.5 GHz) / Client on `8-11` (Efficiency E-core, up to 3.6 GHz).*
 
 | Framework / Implementation | GET `/ping`<br>*(QPS / P50 / P99)* | GET `/users/{id}`<br>*(QPS / P50 / P99)* | POST `/echo`<br>*(QPS / P50 / P99)* | GET `/files/*`<br>*(QPS / P50 / P99)* | CPU<br>*(Idle / Load)* | Peak Memory<br>*(RSS)* |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Zig (Lighting + zio)** | **333.4k**<br>(**59µs** / 7.52ms) | **329.3k**<br>(**60µs** / 7.44ms) | **289.7k**<br>(**75µs** / 5.89ms) | **321.5k**<br>(**63µs** / 7.34ms) | 0.0% / 304.1% | **6.1 MB** |
-| **Rust (`actix-web`)** | **308.0k**<br>(64µs / 6.71ms) | **285.7k**<br>(70µs / 4.74ms) | **263.5k**<br>(81µs / **3.62ms**) | **276.7k**<br>(76µs / 4.34ms) | 0.0% / 314.9% | 8.0 MB |
-| **Zig (Lighting + std.Io)** | **238.1k**<br>(126µs / **1.84ms**) | **225.3k**<br>(141µs / **2.11ms**) | **209.5k**<br>(152µs / **1.46ms**) | **211.5k**<br>(157µs / **0.86ms**) | 0.0% / 296.9% | 16.4 MB |
-| **Go (`net/http`)** | **172.0k**<br>(195µs / 3.30ms) | **164.9k**<br>(204µs / 3.28ms) | **133.6k**<br>(249µs / 2.71ms) | **158.0k**<br>(212µs / 3.18ms) | 0.0% / 381.8% | 15.8 MB |
+| **Zig (Lighting + zio)** | **741.5k**<br>(43µs / **73µs**) | **654.6k**<br>(53µs / **90µs**) | **528.9k**<br>(73µs / **101µs**) | **574.0k**<br>(67µs / **93µs**) | 0.0% / 691.6% | **6.8 MB** |
+| **Rust (`actix-web`)** | **604.1k**<br>(**40µs** / 87µs) | **607.3k**<br>(**40µs** / **90µs**) | **541.0k**<br>(**45µs** / 116µs) | **589.5k**<br>(**41µs** / 98µs) | 0.0% / **525.5%** | 9.0 MB |
+| **Zig (Lighting + std.Io)** | **501.7k**<br>(49µs / 106µs) | **497.2k**<br>(49µs / 107µs) | **453.9k**<br>(54µs / 117µs) | **495.6k**<br>(49µs / 108µs) | 0.0% / 583.6% | 16.7 MB |
+| **Go (`net/http`)** | **357.8k**<br>(103µs / 1.70ms) | **348.1k**<br>(108µs / 1.55ms) | **235.9k**<br>(147µs / 2.02ms) | **317.2k**<br>(120µs / 1.73ms) | 0.0% / 687.5% | 17.5 MB |
 
-* **High Throughput**: Lighting (`zio`) achieves **333k+ QPS** with sub-60µs median latency (P50: 59µs), outperforming Rust `actix-web` and nearly doubling Go `net/http`.
-* **Low Memory**: Peak resident memory stays at **6.1 MB** across 50 concurrent Keep-Alive connections via connection-scoped Arena reuse (`request_arena_retain_limit = 64KB`).
-* **Tail Latency**: Lighting (`std.Io`) maintains rock-solid tail latency (P99: **0.86ms ~ 2.11ms**) across all endpoints.
+* **High Peak Throughput**: Lighting (`zio`) reaches **741k+ QPS** on `/ping` and **654k+ QPS** on dynamic routes with sub-100µs P99 tail latency (**73µs ~ 101µs**), outperforming Rust `actix-web` by up to **22.7%** and more than doubling Go `net/http`.
+* **Ultra-Low Memory**: Peak resident set size remains at just **6.8 MB** across 50 concurrent Keep-Alive connections via connection-scoped Arena reuse (`request_arena_retain_limit = 64KB`), 24% lower than Rust (9.0 MB) and 61% lower than Go (17.5 MB).
+* **Deterministic Core Isolation**: Leverages hardware-aware core pinning (`taskset -c 0-7` for server, `taskset -c 8-11` for `wrk`) to isolate server processing onto high-frequency Performance cores without scheduling migration noise or client contention.
 
-For full methodology, script details,  see [docs/benchmark.md](docs/benchmark.md).
+For full methodology, script details, see [here](bench/README.md).
 
 ---
 
