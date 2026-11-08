@@ -59,12 +59,21 @@ To eliminate scheduling noise and guarantee scientific reproducibility, `bench/r
 | `CLIENT_CORES` | Auto-detected E-cores (e.g. `8-11`) | Explicit CPU core list for `wrk` load generation (`taskset -c <CLIENT_CORES>`). |
 | `PIN_CORES` | `1` (on Linux with `taskset`) | Set `PIN_CORES=0` to disable core pinning and run under default OS scheduler. |
 
+### Inspecting CPU Topology
+
+A dedicated utility script is provided to inspect your machine's physical core hierarchy, frequencies, L2/L3 cache domains, and print optimal `taskset` pinning recommendations:
+
+```bash
+python3 bench/cpu_topology.py
+```
+
 ---
 
 ## Directory Structure
 
 ```
 bench/
+├── cpu_topology.py            # Inspector for CPU clusters, frequencies, and cache domains
 ├── zig/                       # Standalone Zig project (Lighting + pluggable I/O)
 │   ├── build.zig
 │   ├── build.zig.zon
