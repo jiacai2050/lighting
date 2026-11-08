@@ -2,8 +2,8 @@
 """
 CPU Topology and Heterogeneous Cluster Inspector.
 Detects Performance (P-core), Efficiency (E-core), and Low-Power (LP E-core)
-clusters, cache hierarchy, frequencies, and provides optimal taskset core-pinning
-recommendations for benchmarking.
+clusters, physical vs logical cores, cache hierarchy, frequencies, and provides
+optimal taskset core-pinning recommendations for benchmarking.
 """
 
 import os
@@ -53,8 +53,9 @@ class CpuInspector:
         self.system = platform.system()
         self.machine = platform.machine()
         self.cpu_name = "Unknown CPU"
+        self.total_physical_cores = 0
+        self.total_logical_cores = 0
         self.clusters = []
-        self.cpus_info = {}
 
     def inspect(self):
         if self.system == "Linux":
@@ -73,10 +74,14 @@ class CpuInspector:
         except Exception:
             pass
 
-        # 2. Gather per-CPU metrics
-        cpu_dirs = sorted(glob.glob("/sys/devices/system/cpu/cpu[0-9]*"), key=lambda x: int(re.search(r"\d+", x).group()))
+        # 2. Per-CPU hardware metrics
+        cpu_dirs = sorted(
+            glob.glob("/sys/devices/system/cpu/cpu[0-9]*"),
+            key=lambda x: int(re.search(r"\d+", x).group())
+        )
         freq_map = {}
         core_id_map = {}
+        pkg_id_map = {}
         l2_map = {}
         l3_map = {}
 
@@ -86,26 +91,20 @@ class CpuInspector:
             max_freq = int(max_freq_str) / 1e6 if max_freq_str else 0.0
             freq_map[cid] = max_freq
             core_id_map[cid] = read_file(f"{cd}/topology/core_id")
+            pkg_id_map[cid] = read_file(f"{cd}/topology/physical_package_id")
 
-            l2_info = "None"
-            l3_info = "None"
             for cache_dir in glob.glob(f"{cd}/cache/index*"):
                 lvl = read_file(f"{cache_dir}/level")
                 size = read_file(f"{cache_dir}/size")
                 shared = read_file(f"{cache_dir}/shared_cpu_list")
                 if lvl == "2":
-                    l2_info = f"{size} (shared: {shared})"
+                    l2_map[cid] = (size, shared)
                 elif lvl == "3":
-                    l3_info = f"{size} (shared: {shared})"
-            l2_map[cid] = l2_info
-            l3_map[cid] = l3_info
+                    l3_map[cid] = (size, shared)
 
-            self.cpus_info[cid] = {
-                "max_freq": max_freq,
-                "core_id": core_id_map[cid],
-                "l2": l2_info,
-                "l3": l3_info,
-            }
+        self.total_logical_cores = len(freq_map)
+        all_phys = {(pkg_id_map.get(c, 0), core_id_map.get(c, c)) for c in freq_map}
+        self.total_physical_cores = len(all_phys)
 
         # 3. Detect Topology Clusters (core vs atom)
         core_path = "/sys/devices/cpu_core/cpus"
@@ -114,53 +113,53 @@ class CpuInspector:
         atom_cpus = parse_cpulist(read_file(atom_path)) if os.path.exists(atom_path) else set()
 
         if core_cpus and atom_cpus:
-            # Check for LP E-cores within atom_cpus (e.g. Meteor Lake frequency split or lack of L3)
-            p_cpus = core_cpus
+            # Performance cluster
+            p_phys = len({(pkg_id_map.get(c), core_id_map.get(c)) for c in core_cpus})
+            p_freq = max([freq_map.get(c, 0.0) for c in core_cpus]) if core_cpus else 0.0
+            p_size_str = l3_map[min(core_cpus)][0]
+            if p_size_str.endswith("K"):
+                p_size_str = f"{int(p_size_str[:-1]) // 1024} MB"
+            p_l3 = f"{p_size_str} Shared" if any(c in l3_map for c in core_cpus) else "None"
+            self.clusters.append({
+                "type": "Performance (P-core)",
+                "cpus": core_cpus,
+                "phys": p_phys,
+                "logical": len(core_cpus),
+                "smt": f"2x (Hyper-Threading)" if len(core_cpus) > p_phys else "1x (No SMT)",
+                "max_freq": p_freq,
+                "l3": p_l3,
+                "l3_shared": any(c in l3_map for c in core_cpus),
+                "desc": "High clock, 2MB private L2/core, shared L3 cache",
+            })
+
+            # Check E-core vs LP E-core within atom_cpus
             e_clusters = defaultdict(set)
             for c in atom_cpus:
                 freq = freq_map.get(c, 0.0)
-                l3 = l3_map.get(c, "None")
-                e_clusters[(freq, l3 != "None")].add(c)
+                has_l3 = c in l3_map
+                e_clusters[(freq, has_l3)].add(c)
 
-            # Performance cluster
-            p_freq = max([freq_map.get(c, 0.0) for c in p_cpus]) if p_cpus else 0.0
-            self.clusters.append({
-                "type": "Performance (P-core)",
-                "cpus": p_cpus,
-                "max_freq": p_freq,
-                "l3_shared": True,
-                "desc": "High frequency, large L2/core, shared L3 cache",
-            })
-
-            # Check E-core vs LP E-core
             sorted_e = sorted(e_clusters.items(), key=lambda x: (x[0][0], x[0][1]), reverse=True)
-            if len(sorted_e) > 1:
-                # Main E-cores
+            for (freq, has_l3), cpus in sorted_e:
+                e_phys = len({(pkg_id_map.get(c), core_id_map.get(c)) for c in cpus})
+                is_lp = not has_l3 or freq < 3.0
+                cname = "Low Power (LP E-core)" if is_lp else "Efficiency (E-core)"
+                cdesc = "Low clock, SOC die, isolated L2, NO L3 cache" if is_lp else "Mid clock, 4-core cluster shares 2MB L2, shared L3 cache"
+                e_size_str = l3_map[min(cpus)][0] if has_l3 else ""
+                if e_size_str.endswith("K"):
+                    e_size_str = f"{int(e_size_str[:-1]) // 1024} MB"
+                e_l3 = f"{e_size_str} Shared" if has_l3 else "None"
                 self.clusters.append({
-                    "type": "Efficiency (E-core)",
-                    "cpus": sorted_e[0][1],
-                    "max_freq": sorted_e[0][0][0],
-                    "l3_shared": sorted_e[0][0][1],
-                    "desc": "Mid frequency, 4-core cluster shared L2, shared L3 cache",
+                    "type": cname,
+                    "cpus": cpus,
+                    "phys": e_phys,
+                    "logical": len(cpus),
+                    "smt": f"2x (Hyper-Threading)" if len(cpus) > e_phys else "1x (No SMT)",
+                    "max_freq": freq,
+                    "l3": e_l3,
+                    "l3_shared": has_l3,
+                    "desc": cdesc,
                 })
-                # LP E-cores
-                for (freq, has_l3), cpus in sorted_e[1:]:
-                    self.clusters.append({
-                        "type": "Low Power (LP E-core)",
-                        "cpus": cpus,
-                        "max_freq": freq,
-                        "l3_shared": has_l3,
-                        "desc": "Low frequency, SOC die, isolated L2, NO L3 cache",
-                    })
-            else:
-                for (freq, has_l3), cpus in sorted_e:
-                    self.clusters.append({
-                        "type": "Efficiency (E-core)",
-                        "cpus": cpus,
-                        "max_freq": freq,
-                        "l3_shared": has_l3,
-                        "desc": "Efficiency cluster",
-                    })
         else:
             # Fallback by frequency groups
             freq_groups = defaultdict(set)
@@ -168,34 +167,31 @@ class CpuInspector:
                 freq_groups[f].add(cid)
             sorted_freqs = sorted(freq_groups.items(), key=lambda x: x[0], reverse=True)
             if len(sorted_freqs) > 1:
-                self.clusters.append({
-                    "type": "Performance (High Freq)",
-                    "cpus": sorted_freqs[0][1],
-                    "max_freq": sorted_freqs[0][0],
-                    "l3_shared": True,
-                    "desc": "Highest frequency cores",
-                })
-                self.clusters.append({
-                    "type": "Efficiency (Mid Freq)",
-                    "cpus": sorted_freqs[1][1],
-                    "max_freq": sorted_freqs[1][0],
-                    "l3_shared": True,
-                    "desc": "Mid frequency cores",
-                })
-                for freq, cpus in sorted_freqs[2:]:
+                for idx, (freq, cpus) in enumerate(sorted_freqs):
+                    cphys = len({(pkg_id_map.get(c), core_id_map.get(c)) for c in cpus})
+                    has_l3 = any(c in l3_map for c in cpus)
+                    ctype = "Performance" if idx == 0 else ("Efficiency" if idx == 1 else "Low Power")
                     self.clusters.append({
-                        "type": "Low Power (Low Freq)",
+                        "type": f"{ctype} Cores",
                         "cpus": cpus,
+                        "phys": cphys,
+                        "logical": len(cpus),
+                        "smt": f"2x (Hyper-Threading)" if len(cpus) > cphys else "1x (No SMT)",
                         "max_freq": freq,
-                        "l3_shared": False,
-                        "desc": "Lowest frequency cores",
+                        "l3": "Shared" if has_l3 else "None",
+                        "l3_shared": has_l3,
+                        "desc": f"Frequency group {freq:.2f} GHz",
                     })
             else:
                 all_cpus = set(freq_map.keys())
                 self.clusters.append({
                     "type": "Homogeneous Cluster",
                     "cpus": all_cpus,
+                    "phys": self.total_physical_cores,
+                    "logical": len(all_cpus),
+                    "smt": f"2x (Hyper-Threading)" if len(all_cpus) > self.total_physical_cores else "1x (No SMT)",
                     "max_freq": sorted_freqs[0][0] if sorted_freqs else 0.0,
+                    "l3": "Shared",
                     "l3_shared": True,
                     "desc": "Uniform architecture across all cores",
                 })
@@ -203,6 +199,8 @@ class CpuInspector:
     def _inspect_darwin(self):
         try:
             self.cpu_name = subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"], stderr=subprocess.DEVNULL).decode().strip()
+            self.total_physical_cores = int(subprocess.check_output(["sysctl", "-n", "hw.physicalcpu"], stderr=subprocess.DEVNULL).decode().strip())
+            self.total_logical_cores = int(subprocess.check_output(["sysctl", "-n", "hw.logicalcpu"], stderr=subprocess.DEVNULL).decode().strip())
             nperf = int(subprocess.check_output(["sysctl", "-n", "hw.nperflevels"], stderr=subprocess.DEVNULL).decode().strip())
             for i in range(nperf):
                 name = subprocess.check_output(["sysctl", "-n", f"hw.perflevel{i}.name"], stderr=subprocess.DEVNULL).decode().strip()
@@ -210,7 +208,11 @@ class CpuInspector:
                 self.clusters.append({
                     "type": f"{name} Cores",
                     "cpus": f"{count} cores",
+                    "phys": count,
+                    "logical": count,
+                    "smt": "1x (No SMT)",
                     "max_freq": 0.0,
+                    "l3": "Shared",
                     "l3_shared": True,
                     "desc": f"Apple Silicon {name} level",
                 })
@@ -226,29 +228,30 @@ class CpuInspector:
         RED = "\033[31m" if is_tty else ""
         RESET = "\033[0m" if is_tty else ""
 
-        print("=" * 80)
+        print("=" * 86)
         print(f" {BOLD}CPU Topology & Heterogeneous Core Inspector{RESET}")
-        print("=" * 80)
-        print(f"  {BOLD}Processor{RESET}     : {CYAN}{self.cpu_name}{RESET}")
-        total_cpus = len(self.cpus_info) if self.cpus_info else "N/A"
-        print(f"  {BOLD}Logical Cores{RESET} : {total_cpus}")
-        print(f"  {BOLD}Architecture{RESET}  : {self.machine} ({self.system})")
-        print("-" * 80)
+        print("=" * 86)
+        print(f"  {BOLD}Processor{RESET}       : {CYAN}{self.cpu_name}{RESET}")
+        print(f"  {BOLD}Physical Cores{RESET}  : {BOLD}{self.total_physical_cores}{RESET} physical cores")
+        print(f"  {BOLD}Logical Threads{RESET} : {BOLD}{self.total_logical_cores}{RESET} logical threads")
+        print(f"  {BOLD}Architecture{RESET}    : {self.machine} ({self.system})")
+        print("-" * 86)
 
         print(f"\n{BOLD}Core Clusters Detected:{RESET}\n")
-        print(f"  {'Cluster Type':<26} | {'CPUs':<10} | {'Max Clock':<11} | {'L3 Cache':<9} | {'Characteristics'}")
-        print("  " + "-" * 76)
+        print(f"  {'Cluster Type':<25} | {'Logical CPUs':<13} | {'Physical':<9} | {'SMT Threads':<13} | {'Max Clock':<11} | {'L3 Cache':<13}")
+        print("  " + "-" * 91)
 
         for cl in self.clusters:
             cpus_str = format_cpulist(cl["cpus"]) if isinstance(cl["cpus"], set) else str(cl["cpus"])
             freq_str = f"{cl['max_freq']:.2f} GHz" if cl['max_freq'] > 0 else "Auto (QoS)"
-            l3_str = f"{GREEN}Shared{RESET}" if cl["l3_shared"] else f"{RED}None{RESET}"
+            l3_str = f"{GREEN}{cl['l3']}{RESET}" if cl["l3_shared"] else f"{RED}{cl['l3']}{RESET}"
             color = GREEN if "Performance" in cl["type"] else (YELLOW if "Efficiency" in cl["type"] else RED)
-            print(f"  {color}{cl['type']:<26}{RESET} | {cpus_str:<10} | {freq_str:<11} | {l3_str:<18} | {cl['desc']}")
+            phys_str = f"{cl['phys']} cores"
+            print(f"  {color}{cl['type']:<25}{RESET} | {cpus_str:<13} | {phys_str:<9} | {cl['smt']:<13} | {freq_str:<11} | {l3_str}")
 
-        print("\n" + "=" * 80)
+        print("\n" + "=" * 86)
         print(f" {BOLD}Benchmarking & Core Pinning Recommendations{RESET}")
-        print("=" * 80)
+        print("=" * 86)
 
         if len(self.clusters) > 1 and self.system == "Linux":
             p_cluster = next((c for c in self.clusters if "Performance" in c["type"]), None)
@@ -258,18 +261,17 @@ class CpuInspector:
             p_list = format_cpulist(p_cluster["cpus"]) if p_cluster else "0-7"
             e_list = format_cpulist(e_cluster["cpus"]) if e_cluster else "8-11"
 
-            # Allocate up to 4 E-cores for wrk
             wrk_cpus = sorted(list(e_cluster["cpus"]))[:4] if e_cluster else [8, 9, 10, 11]
             wrk_list = format_cpulist(set(wrk_cpus))
 
             print(f"\n  [✓] {BOLD}Server Binding (Under Test){RESET}:")
             print(f"      {GREEN}taskset -c {p_list} <server_binary>{RESET}")
-            print(f"      -> Dedicated to {p_cluster['type']} ({p_cluster['max_freq']:.1f} GHz).")
+            print(f"      -> Dedicated to {p_cluster['type']} ({p_cluster['phys']} cores, {p_cluster['logical']} threads, up to {p_cluster['max_freq']:.1f} GHz).")
             print(f"         Maximizes single-thread and ring-buffer I/O pipeline capacity.")
 
             print(f"\n  [✓] {BOLD}Client Binding (wrk Load Generator){RESET}:")
             print(f"      {CYAN}taskset -c {wrk_list} wrk -t4 -c50 ...{RESET}")
-            print(f"      -> Dedicated to independent {e_cluster['type']} ({e_cluster['max_freq']:.1f} GHz).")
+            print(f"      -> Dedicated to independent {e_cluster['type']} (up to {e_cluster['max_freq']:.1f} GHz).")
             print(f"         Prevents wrk client threads from stealing CPU cycles from the server.")
 
             if lp_cluster:
