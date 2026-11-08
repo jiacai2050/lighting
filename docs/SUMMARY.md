@@ -37,6 +37,6 @@
 
 # Project & Evolution
 - [Architecture Design Spec](design.md)
-- [Benchmarks](benchmark.md)
+- [Benchmarks](bench.md)
 - [Developer Guide](dev.md)
 - [Roadmap](roadmap.md)

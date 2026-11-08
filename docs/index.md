@@ -14,4 +14,4 @@ The documentation is organized into five specialized sections:
 * **[User Guide](guide/server.md)**: Comprehensive, task-oriented guides for building web applications — covering server lifecycle, routing syntax, request inspection, response generation, state injection, middleware pipelines, static files, and WebSockets.
 * **[Internals](internals/architecture.md)**: In-depth technical analysis for systems engineers and contributors — exploring structured concurrency dispatch, zero-copy protocol parsing, decision-tree routing algorithms, arena allocators, and TigerStyle defensive invariants.
 * **[Cookbook](cookbook/hello.md)**: Real-world, end-to-end applications including REST APIs, SQLite with embedded SPAs, WebSocket chat servers, and command-line file servers.
-* **[Project & Evolution](benchmark.md)**: Architecture design specifications, empirical benchmarks with comparative throughput metrics, development workflow, and protocol milestones.
+* **[Project & Evolution](design.md)**: Architecture design specifications, development workflow, and protocol milestones.
