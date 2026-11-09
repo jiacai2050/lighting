@@ -90,7 +90,7 @@ pub const LoggingHandler = struct {
 
         const duration = start.durationTo(std.Io.Clock.awake.now(w.io));
         const us = duration.toMicroseconds();
-        const code = w.status_code.code();
+        const code = w.statusCode();
 
         if (us < 1000) {
             std.log.info("{s} {s} {d} ({d}µs)", .{ method, path, code, us });

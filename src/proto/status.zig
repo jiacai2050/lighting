@@ -40,6 +40,8 @@ pub const Status = enum(u16) {
     unsupported_media_type = 415,
     range_not_satisfiable = 416,
     expectation_failed = 417,
+    unprocessable_entity = 422,
+    too_many_requests = 429,
     header_fields_too_large = 431,
 
     internal_server_error = 500,
@@ -92,6 +94,8 @@ pub const Status = enum(u16) {
             .unsupported_media_type => "Unsupported Media Type",
             .range_not_satisfiable => "Range Not Satisfiable",
             .expectation_failed => "Expectation Failed",
+            .unprocessable_entity => "Unprocessable Entity",
+            .too_many_requests => "Too Many Requests",
             .header_fields_too_large => "Request Header Fields Too Large",
 
             .internal_server_error => "Internal Server Error",

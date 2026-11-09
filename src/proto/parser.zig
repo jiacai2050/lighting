@@ -4,6 +4,7 @@ const std = @import("std");
 const Method = @import("method.zig").Method;
 const HeaderMap = @import("../header.zig").HeaderMap;
 const isValidTokenChar = @import("../header.zig").isValidTokenChar;
+const isValidHeaderValue = @import("../header.zig").isValidHeaderValue;
 
 /// Version represents the HTTP protocol version of a request or response.
 pub const Version = enum {
@@ -129,7 +130,8 @@ pub fn parseRequestHead(allocator: std.mem.Allocator, buffer: []const u8) ParseE
 
     var content_length: ?u64 = null;
     var is_chunked = false;
-    var connection_hdr: ?[]const u8 = null;
+    var has_conn_close = false;
+    var has_conn_keep_alive = false;
     var host_count: usize = 0;
 
     while (line_it.next()) |line| {
@@ -148,9 +150,7 @@ pub fn parseRequestHead(allocator: std.mem.Allocator, buffer: []const u8) ParseE
 
         const key = raw_key;
         const val = std.mem.trim(u8, line[colon_idx + 1 ..], " \t");
-        for (val) |c| {
-            if (c < 0x20 and c != '\t') return error.InvalidHeader;
-        }
+        if (!isValidHeaderValue(val)) return error.InvalidHeader;
 
         headers.add(key, val) catch |err| {
             if (err == error.InvalidHeaderCharacter) return error.InvalidHeader;
@@ -201,7 +201,15 @@ pub fn parseRequestHead(allocator: std.mem.Allocator, buffer: []const u8) ParseE
                 return error.InvalidTransferEncoding;
             }
         } else if (std.ascii.eqlIgnoreCase(key, "connection")) {
-            connection_hdr = val;
+            var conn_it = std.mem.splitScalar(u8, val, ',');
+            while (conn_it.next()) |raw_tok| {
+                const tok = std.mem.trim(u8, raw_tok, " \t");
+                if (std.ascii.eqlIgnoreCase(tok, "close")) {
+                    has_conn_close = true;
+                } else if (std.ascii.eqlIgnoreCase(tok, "keep-alive")) {
+                    has_conn_keep_alive = true;
+                }
+            }
         }
     }
 
@@ -216,17 +224,10 @@ pub fn parseRequestHead(allocator: std.mem.Allocator, buffer: []const u8) ParseE
     }
 
     // Determine keep-alive policy
-    var keep_alive: bool = switch (version) {
-        .@"HTTP/1.1" => true,
-        .@"HTTP/1.0" => false,
+    const keep_alive: bool = switch (version) {
+        .@"HTTP/1.1" => if (has_conn_close) false else true,
+        .@"HTTP/1.0" => if (has_conn_close) false else has_conn_keep_alive,
     };
-    if (connection_hdr) |conn| {
-        if (std.ascii.findIgnoreCase(conn, "close") != null) {
-            keep_alive = false;
-        } else if (std.ascii.findIgnoreCase(conn, "keep-alive") != null) {
-            keep_alive = true;
-        }
-    }
 
     return RequestHead{
         .method = method,
@@ -355,4 +356,41 @@ test "parseRequestHead RFC compliance: request-target forms validation" {
         const bad_char = "GET /bad\x01path HTTP/1.1\r\nHost: localhost\r\n\r\n";
         try std.testing.expectError(error.InvalidTarget, parseRequestHead(allocator, bad_char));
     }
+}
+
+test "Connection header token parsing and keep-alive policy" {
+    const allocator = std.testing.allocator;
+
+    // Substring contains 'close' as part of other token should NOT be treated as close
+    {
+        const raw = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: not-close-token\r\n\r\n";
+        const head = try parseRequestHead(allocator, raw);
+        var h = head.headers;
+        defer h.deinit();
+        try std.testing.expect(head.keep_alive);
+    }
+
+    // Exact close token in comma-separated list
+    {
+        const raw = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: custom, close\r\n\r\n";
+        const head = try parseRequestHead(allocator, raw);
+        var h = head.headers;
+        defer h.deinit();
+        try std.testing.expect(!head.keep_alive);
+    }
+
+    // Multiple Connection headers with close
+    {
+        const raw = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\nConnection: close\r\n\r\n";
+        const head = try parseRequestHead(allocator, raw);
+        var h = head.headers;
+        defer h.deinit();
+        try std.testing.expect(!head.keep_alive);
+    }
+}
+
+test "Header value rejects 0x7f DEL character" {
+    const allocator = std.testing.allocator;
+    const raw = "GET / HTTP/1.1\r\nHost: localhost\r\nX-Bad: value\x7Fwithdel\r\n\r\n";
+    try std.testing.expectError(error.InvalidHeader, parseRequestHead(allocator, raw));
 }

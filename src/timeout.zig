@@ -45,6 +45,10 @@ pub const TimeoutHandler = struct {
     fn sendTimeoutResponse(self: *TimeoutHandler, w: *ResponseWriter) !void {
         w.setStatus(.gateway_timeout);
         w.keep_alive = false;
+        w.chunked_mode = false;
+        w.buffer_len = 0;
+        w.headers.delete("Content-Length");
+        w.headers.delete("Transfer-Encoding");
         try w.header().set("Content-Type", "text/plain; charset=utf-8");
         try w.header().set("Connection", "close");
         try w.writeAll(self.message);

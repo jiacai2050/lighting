@@ -230,15 +230,23 @@ pub const Conn = struct {
     /// Sends a Close control frame with optional status code and reason string.
     pub fn writeClose(self: *Conn, code: ?u16, reason: ?[]const u8) !void {
         if (self.closed) return;
-        var close_buf: [127]u8 = undefined;
+        // RFC 6455 Section 5.5: Control frames must not have a payload length exceeding 125 bytes.
+        var close_buf: [125]u8 = undefined;
         var payload_len: usize = 0;
         if (code) |c| {
             std.mem.writeInt(u16, close_buf[0..2], c, .big);
             payload_len = 2;
             if (reason) |r| {
+                // Maximum reason length is 125 - 2 = 123 bytes
                 var copy_len = @min(r.len, close_buf.len - 2);
-                while (copy_len > 0 and (r[copy_len - 1] & 0xC0) == 0x80) {
+                // A valid UTF-8 sequence is at most 4 bytes, retreating at most 4 steps finds boundary
+                var attempts: usize = 0;
+                while (copy_len > 0 and attempts < 4) : (attempts += 1) {
+                    if (std.unicode.utf8ValidateSlice(r[0..copy_len])) break;
                     copy_len -= 1;
+                }
+                if (attempts == 4 and !std.unicode.utf8ValidateSlice(r[0..copy_len])) {
+                    copy_len = 0;
                 }
                 @memcpy(close_buf[2 .. 2 + copy_len], r[0..copy_len]);
                 payload_len += copy_len;

@@ -14,8 +14,12 @@ pub const ReverseProxyOptions = struct {
     target_addr: std.Io.net.IpAddress,
     /// Optional callback hook to rewrite the request line, target, or headers before upstream delivery.
     director: ?*const fn (req: *Request) void = null,
-    /// Connection timeout to the upstream server in nanoseconds. Defaults to 5 seconds.
-    connect_timeout_ns: ?u64 = 5 * std.time.ns_per_s,
+    /// Upstream I/O timeout in nanoseconds for write and read operations.
+    /// Note: Socket connect() timeout is currently unsupported by Zig's POSIX std.Io runtime.
+    /// Defaults to 5 seconds.
+    upstream_timeout_ns: ?u64 = 5 * std.time.ns_per_s,
+    /// Deprecated: alias for upstream_timeout_ns for backward compatibility.
+    connect_timeout_ns: ?u64 = null,
 };
 
 /// ReverseProxy forwards incoming HTTP requests to an upstream server and proxies the response back.
@@ -35,6 +39,8 @@ pub const ReverseProxy = struct {
         if (self.options.director) |dir| {
             dir(req);
         }
+
+        const io_timeout = self.options.connect_timeout_ns orelse self.options.upstream_timeout_ns;
 
         // 1. Connect to upstream
         var upstream = self.options.target_addr.connect(w.io, .{ .mode = .stream }) catch |err| {
@@ -86,7 +92,7 @@ pub const ReverseProxy = struct {
 
         // Send request head to upstream
         var send_head_vec = [1][]const u8{head_buf.items};
-        _ = try (try w.io.operate(.{ .net_write = .{ .socket_handle = upstream.socket.handle, .data = &send_head_vec } })).net_write;
+        try io_util.writeSocketAllTimeout(upstream, w.io, &send_head_vec, io_timeout);
 
         // Forward request body if present
         if (req.body()) |b| {
@@ -95,7 +101,7 @@ pub const ReverseProxy = struct {
                 const n = try b.read(&body_chunk);
                 if (n == 0) break;
                 var write_vec = [1][]const u8{body_chunk[0..n]};
-                _ = try (try w.io.operate(.{ .net_write = .{ .socket_handle = upstream.socket.handle, .data = &write_vec } })).net_write;
+                try io_util.writeSocketAllTimeout(upstream, w.io, &write_vec, io_timeout);
             }
         }
 
@@ -106,9 +112,21 @@ pub const ReverseProxy = struct {
         var body_start: usize = 0;
 
         while (true) {
-            var read_vec = [1][]u8{resp_buf[resp_len..]};
-            const op_res = try w.io.operate(.{ .net_read = .{ .socket_handle = upstream.socket.handle, .data = &read_vec } });
-            const n = (try op_res.net_read).data_len;
+            if (resp_len == resp_buf.len and !headers_parsed) {
+                w.setStatus(.bad_gateway);
+                try w.header().set("Content-Type", "text/plain; charset=utf-8");
+                try w.writeAll("Bad Gateway: Upstream response headers too large\n");
+                return;
+            }
+            const n = io_util.readSocketTimeout(upstream, w.io, resp_buf[resp_len..], io_timeout) catch |err| {
+                if (!headers_parsed) {
+                    w.setStatus(if (err == error.Timeout) .gateway_timeout else .bad_gateway);
+                    try w.header().set("Content-Type", "text/plain; charset=utf-8");
+                    try w.writeAll("Bad Gateway: Upstream communication failed\n");
+                    return;
+                }
+                return err;
+            };
             if (n == 0) break;
             resp_len += n;
 
@@ -161,7 +179,7 @@ fn parseAndForwardUpstreamHeaders(w: *ResponseWriter, arena: std.mem.Allocator, 
     _ = status_parts.next(); // Skip HTTP/1.1
     if (status_parts.next()) |code_str| {
         const code = std.fmt.parseInt(u16, code_str, 10) catch 502;
-        w.writeHeader(@fromBackingInt(@intCast(code)));
+        w.writeHeaderCode(code);
     }
 
     while (lines.next()) |line| {

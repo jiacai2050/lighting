@@ -20,7 +20,7 @@ pub const ResponseWriter = struct {
     io: std.Io,
     arena: std.mem.Allocator,
     headers: HeaderMap,
-    status_code: Status = .ok,
+    status_code: u16 = 200,
     header_written: bool = false,
     version: Version = .@"HTTP/1.1",
     keep_alive: bool = true,
@@ -64,12 +64,17 @@ pub const ResponseWriter = struct {
         };
     }
 
+    /// allowsBodyCode reports whether the given numeric HTTP status code allows a message body per RFC 9110 Section 6.4.1.
+    pub fn allowsBodyCode(code: u16) bool {
+        return switch (code) {
+            100...199, 204, 205, 304 => false,
+            else => true,
+        };
+    }
+
     /// allowsBody reports whether the given HTTP status allows a message body per RFC 9110 Section 6.4.1.
     pub fn allowsBody(status: Status) bool {
-        const code = status.code();
-        if (code >= 100 and code < 200) return false;
-        if (code == 204 or code == 205 or code == 304) return false;
-        return true;
+        return allowsBodyCode(status.code());
     }
 
     /// formatHttpDate formats a Unix epoch timestamp (seconds) into standard RFC 9110 IMF-fixdate format:
@@ -112,9 +117,30 @@ pub const ResponseWriter = struct {
     /// writeHeader sets the HTTP response status code.
     /// Subsequent calls to writeHeader or setStatus have no effect if headers have already been sent.
     pub fn writeHeader(self: *ResponseWriter, status: Status) void {
-        if (!self.header_written) {
-            self.status_code = status;
-        }
+        if (self.header_written) return;
+        self.status_code = status.code();
+    }
+
+    /// writeHeaderCode sets a numeric HTTP status code (RFC 9112 Section 4: 100..999).
+    /// Non-conforming codes fall back to 502 Bad Gateway.
+    /// Subsequent calls have no effect if headers have already been sent.
+    pub fn writeHeaderCode(self: *ResponseWriter, code: u16) void {
+        if (self.header_written) return;
+        self.status_code = switch (code) {
+            100...999 => code,
+            else => 502,
+        };
+    }
+
+    /// statusCode returns the numeric integer HTTP status code.
+    pub fn statusCode(self: *const ResponseWriter) u16 {
+        return self.status_code;
+    }
+
+    /// statusPhrase returns the standard RFC 9110 reason phrase if known, or an empty string.
+    pub fn statusPhrase(self: *const ResponseWriter) []const u8 {
+        if (Status.fromCode(self.status_code)) |s| return s.phrase();
+        return "";
     }
 
     /// setStatus is an alias for writeHeader.
@@ -138,7 +164,7 @@ pub const ResponseWriter = struct {
         if (data.len == 0) return 0;
 
         // 1. If status does not allow a body (204, 304, 1xx), suppress body completely (RFC 9110)
-        if (!allowsBody(self.status_code)) {
+        if (!allowsBodyCode(self.statusCode())) {
             return data.len;
         }
 
@@ -245,7 +271,7 @@ pub const ResponseWriter = struct {
     /// If Content-Length was not set, this transitions to chunked transfer encoding (in HTTP/1.1).
     pub fn flush(self: *ResponseWriter) !void {
         if (self.hijacked) return error.AlreadyHijacked;
-        if (!allowsBody(self.status_code) or self.is_head) return;
+        if (!allowsBodyCode(self.statusCode()) or self.is_head) return;
 
         try self.ensureHeadersWritten();
         try self.flushBuffer();
@@ -321,7 +347,7 @@ pub const ResponseWriter = struct {
         }
 
         // If status or method forbids a body, ensure no buffer is emitted
-        if (!allowsBody(self.status_code) or self.is_head) {
+        if (!allowsBodyCode(self.statusCode()) or self.is_head) {
             self.buffer_len = 0;
         }
 
@@ -335,37 +361,52 @@ pub const ResponseWriter = struct {
         // RFC 9110 Section 8.6 & 6.4.1 & RFC 9112 Section 6.1:
         // 1xx, 204, 304 must NOT include Content-Length or Transfer-Encoding (strip even if user set them)
         // 205 MUST NOT include a body; Content-Length if present must be 0, no chunked
-        const code = self.status_code.code();
-        if ((code >= 100 and code < 200) or code == 204 or code == 304) {
-            self.headers.delete("Content-Length");
-            self.headers.delete("Transfer-Encoding");
-            self.chunked_mode = false;
-        } else if (code == 205) {
-            self.headers.delete("Transfer-Encoding");
-            self.chunked_mode = false;
-            if (self.headers.get("content-length") != null) {
-                try self.headers.set("Content-Length", "0");
-            }
-        } else if (self.version == .@"HTTP/1.0") {
-            // RFC 9112 Section 6.1: HTTP/1.0 does not support chunked
-            self.headers.delete("Transfer-Encoding");
-            self.chunked_mode = false;
-        } else if (self.chunked_mode) {
-            self.headers.delete("Content-Length");
-            self.headers.delete("Transfer-Encoding");
-            try self.headers.set("Transfer-Encoding", "chunked");
-        } else {
-            // Non-chunked mode must never send Transfer-Encoding
-            self.headers.delete("Transfer-Encoding");
+        // HEAD responses must never emit Transfer-Encoding: chunked since finish() emits no chunks
+        const code = self.statusCode();
+        switch (code) {
+            100...199, 204, 304 => {
+                self.headers.delete("Content-Length");
+                self.headers.delete("Transfer-Encoding");
+                self.chunked_mode = false;
+            },
+            205 => {
+                self.headers.delete("Transfer-Encoding");
+                self.chunked_mode = false;
+                if (self.headers.get("content-length") != null) {
+                    try self.headers.set("Content-Length", "0");
+                }
+            },
+            else => if (self.is_head) {
+                self.headers.delete("Transfer-Encoding");
+                self.chunked_mode = false;
+            } else if (self.version == .@"HTTP/1.0") {
+                // RFC 9112 Section 6.1: HTTP/1.0 does not support chunked
+                self.headers.delete("Transfer-Encoding");
+                self.chunked_mode = false;
+            } else if (self.chunked_mode) {
+                self.headers.delete("Content-Length");
+                self.headers.delete("Transfer-Encoding");
+                try self.headers.set("Transfer-Encoding", "chunked");
+            } else {
+                // Non-chunked mode must never send Transfer-Encoding
+                self.headers.delete("Transfer-Encoding");
+            },
         }
 
-        // Format Status Line: e.g. "HTTP/1.1 200 OK\r\n" or "HTTP/1.0 200 OK\r\n"
+        // Format Status Line: e.g. "HTTP/1.1 200 OK\r\n" or "HTTP/1.1 599\r\n"
         var line_buf: [64]u8 = undefined;
-        const status_line = std.fmt.bufPrint(&line_buf, "{s} {d} {s}\r\n", .{
-            self.version.asString(),
-            self.status_code.code(),
-            self.status_code.phrase(),
-        }) catch unreachable;
+        const phrase = self.statusPhrase();
+        const status_line = if (phrase.len > 0)
+            std.fmt.bufPrint(&line_buf, "{s} {d} {s}\r\n", .{
+                self.version.asString(),
+                self.statusCode(),
+                phrase,
+            }) catch unreachable
+        else
+            std.fmt.bufPrint(&line_buf, "{s} {d}\r\n", .{
+                self.version.asString(),
+                self.statusCode(),
+            }) catch unreachable;
 
         // Fast Path: serialize status line and headers into a contiguous 1KB stack buffer
         // to issue a single atomic socket write (1-2 iovecs: [headers, body]) instead of
@@ -473,7 +514,7 @@ pub const ResponseWriter = struct {
     /// Called at the end of the request handler execution
     pub fn finish(self: *ResponseWriter) !void {
         if (self.hijacked) return;
-        const body_allowed = allowsBody(self.status_code);
+        const body_allowed = allowsBodyCode(self.statusCode());
 
         // Check if actual written + buffered is less than user-specified Content-Length
         // MUST check before flushHeaders() so we don't advertise Connection: keep-alive
@@ -502,10 +543,12 @@ pub const ResponseWriter = struct {
             // Response fit completely inside buffer or is HEAD / 204
             if (!body_allowed) {
                 self.buffer_len = 0;
-                if (self.status_code.code() == 205) {
+                if (self.statusCode() == 205) {
                     try self.headers.set("Content-Length", "0");
                 }
             } else if (self.is_head) {
+                self.chunked_mode = false;
+                self.headers.delete("Transfer-Encoding");
                 if (self.headers.get("content-length") == null) {
                     var len_buf: [32]u8 = undefined;
                     const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{self.bytes_written}) catch unreachable;
@@ -596,4 +639,27 @@ test "formatHttpDate compliance with RFC 9110 IMF-fixdate format" {
     // 4. Leap day rollover: 2000-03-01 00:00:00 GMT (Wednesday)
     const leap_next = ResponseWriter.formatHttpDate(&buf, 951868800);
     try std.testing.expectEqualStrings("Wed, 01 Mar 2000 00:00:00 GMT", leap_next);
+}
+
+test "ResponseWriter custom status code" {
+    var dummy_rw: ResponseWriter = undefined;
+    dummy_rw.header_written = false;
+    dummy_rw.status_code = 200;
+
+    // Setting standard status code via writeHeaderCode
+    dummy_rw.writeHeaderCode(404);
+    try std.testing.expectEqual(@as(u16, 404), dummy_rw.statusCode());
+    try std.testing.expectEqualStrings("Not Found", dummy_rw.statusPhrase());
+
+    // Setting non-standard custom status code (emits empty reason phrase per RFC 9112)
+    dummy_rw.header_written = false;
+    dummy_rw.writeHeaderCode(599);
+    try std.testing.expectEqual(@as(u16, 599), dummy_rw.statusCode());
+    try std.testing.expectEqualStrings("", dummy_rw.statusPhrase());
+
+    // Codes outside 100..999 normalize to 502 Bad Gateway per RFC 9112 Section 4
+    dummy_rw.header_written = false;
+    dummy_rw.writeHeaderCode(12345);
+    try std.testing.expectEqual(@as(u16, 502), dummy_rw.statusCode());
+    try std.testing.expectEqualStrings("Bad Gateway", dummy_rw.statusPhrase());
 }

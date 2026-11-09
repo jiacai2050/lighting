@@ -924,3 +924,208 @@ test "e2e: extra.proxy ReverseProxy header rewrite and streaming" {
         try std.testing.expect(std.mem.indexOf(u8, resp, "Bad Gateway") != null);
     }
 }
+
+test "e2e: extra.proxy upstream unlisted status code 429 and transparent 599 forwarding" {
+    const allocator = std.testing.allocator;
+    const io = getTestIo();
+
+    // 1. Upstream server returning 429 Too Many Requests and 599
+    var upstream_mux = http.ServeMux.init(allocator);
+    defer upstream_mux.deinit();
+
+    try upstream_mux.handleFunc("GET /rate-limited", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            w.setStatus(.too_many_requests);
+            try w.writeAll("Slow down\n");
+        }
+    }.handle);
+
+    try upstream_mux.handleFunc("GET /custom-599", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            const stream = try w.hijack();
+            defer stream.close(w.io);
+            const raw =
+                "HTTP/1.1 599 Custom Error\r\n" ++
+                "Content-Length: 4\r\nConnection: close\r\n\r\nfail";
+            var raw_vec = [1][]const u8{raw};
+            _ = try (try w.io.operate(.{
+                .net_write = .{ .socket_handle = stream.socket.handle, .data = &raw_vec },
+            })).net_write;
+        }
+    }.handle);
+
+    try upstream_mux.handleFunc("GET /invalid-code-12345", struct {
+        fn handle(w: *http.ResponseWriter, _: *http.Request) anyerror!void {
+            const stream = try w.hijack();
+            defer stream.close(w.io);
+            const raw =
+                "HTTP/1.1 12345 Very Long Nonconforming Status Code " ++
+                "Reason Phrase For Testing\r\n" ++
+                "Content-Length: 4\r\nConnection: close\r\n\r\nfail";
+            var raw_vec = [1][]const u8{raw};
+            _ = try (try w.io.operate(.{
+                .net_write = .{ .socket_handle = stream.socket.handle, .data = &raw_vec },
+            })).net_write;
+        }
+    }.handle);
+
+    var upstream_ts = try helpers.TestServer.start(
+        allocator,
+        io,
+        .{ .handler = upstream_mux.handler() },
+    );
+    defer upstream_ts.stop();
+
+    const upstream_target_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", upstream_ts.port);
+
+    // 2. Proxy server
+    var proxy = http.extra.proxy.reverseProxy(.{
+        .target_addr = upstream_target_addr,
+    });
+
+    var proxy_server = try helpers.TestServer.start(allocator, io, .{ .handler = proxy.handler() });
+    defer proxy_server.stop();
+
+    const proxy_connect_addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", proxy_server.port);
+
+    // Test 429 forwarded without crash
+    {
+        var client = try proxy_connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /rate-limited HTTP/1.1\r\nHost: proxy\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [1024]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 429 Too Many Requests\r\n"));
+    }
+
+    // Test 599 unknown code falls back to 502 Bad Gateway without crash
+    {
+        var client = try proxy_connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /custom-599 HTTP/1.1\r\nHost: proxy\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [1024]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 599\r\n"));
+    }
+
+    // Test non-conforming 5-digit code safely normalizes to 502 Bad Gateway
+    {
+        var client = try proxy_connect_addr.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+
+        const req = "GET /invalid-code-12345 HTTP/1.1\r\nHost: proxy\r\nConnection: close\r\n\r\n";
+        var vec = [1][]const u8{req};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+        var buf: [1024]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            var r_vec = [1][]u8{buf[total..]};
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+            if (n == 0) break;
+            total += n;
+        }
+
+        const resp = buf[0..total];
+        try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 502 Bad Gateway\r\n"));
+    }
+}
+
+test "e2e: extra.ws writeClose truncates safely under 125 bytes with valid UTF-8" {
+    const allocator = std.testing.allocator;
+    const io = getTestIo();
+
+    var mux = http.ServeMux.init(allocator);
+    defer mux.deinit();
+
+    try mux.handleFunc("GET /ws-long-close", struct {
+        fn handle(w: *http.ResponseWriter, req: *http.Request) anyerror!void {
+            var conn = try http.extra.ws.upgrade(w, req, .{});
+            defer conn.close();
+
+            // 200-byte reason with multibyte UTF-8 characters "你好世界" repeated
+            const long_reason =
+                "Hello你好世界Hello你好世界Hello你好世界Hello你好世界Hello你好世界" ++
+                "Hello你好世界Hello你好世界Hello你好世界Hello你好世界Hello你好世界";
+            try conn.writeClose(1000, long_reason);
+        }
+    }.handle);
+
+    var ts = try helpers.TestServer.start(allocator, io, .{ .handler = mux.handler() });
+    defer ts.stop();
+
+    var client = try ts.connect(io);
+    defer client.close(io);
+
+    const handshake_req =
+        "GET /ws-long-close HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+        "Sec-WebSocket-Version: 13\r\n\r\n";
+    var vec = [1][]const u8{handshake_req};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &vec } })).net_write;
+
+    var resp_buf: [512]u8 = undefined;
+    var total: usize = 0;
+    while (total < resp_buf.len) {
+        var r_vec = [1][]u8{resp_buf[total..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        total += n;
+        if (std.mem.indexOf(u8, resp_buf[0..total], "\r\n\r\n") != null) break;
+    }
+
+    // Read the Close frame emitted by server
+    const hdr_end = (std.mem.indexOf(u8, resp_buf[0..total], "\r\n\r\n") orelse total) + 4;
+    var close_frame: [256]u8 = undefined;
+    var frame_len: usize = 0;
+    if (hdr_end < total) {
+        const extra = resp_buf[hdr_end..total];
+        @memcpy(close_frame[0..extra.len], extra);
+        frame_len = extra.len;
+    }
+    while (frame_len < close_frame.len) {
+        var r_vec = [1][]u8{close_frame[frame_len..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = client.socket.handle, .data = &r_vec } })).net_read).data_len;
+        if (n == 0) break;
+        frame_len += n;
+    }
+
+    // Frame opcode must be close (0x88)
+    try std.testing.expect(frame_len >= 2);
+    try std.testing.expectEqual(@as(u8, 0x88), close_frame[0]);
+    const payload_len = close_frame[1] & 0x7F;
+    // RFC 6455: control frame payload length must be <= 125
+    try std.testing.expect(payload_len <= 125);
+    // Payload contains 2-byte code + UTF-8 reason
+    try std.testing.expect(payload_len >= 2);
+    // Unmasked server frame: 2-byte frame header + 2-byte status code => reason starts at 4
+    const reason_slice = close_frame[4 .. 2 + payload_len];
+    try std.testing.expect(std.unicode.utf8ValidateSlice(reason_slice));
+}

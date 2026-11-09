@@ -68,7 +68,8 @@ pub const Server = struct {
 
     /// shutdown gracefully terminates the server and blocks until all in-flight connections
     /// have completed and serve() has returned (matching Go's srv.Shutdown()).
-    /// Safe to call concurrently from any thread.
+    /// Safe to call concurrently from any thread, but must NOT be called synchronously
+    /// from within an active HTTP request handler as it will deadlock waiting for itself to complete.
     pub fn shutdown(self: *Server) void {
         if (!self.isRunning()) return;
         self.close();

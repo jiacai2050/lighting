@@ -121,7 +121,13 @@ pub const RoutingNode = struct {
         const rest = s.rest;
 
         // 1. Literal match (most specific)
-        if (self.children.get(seg)) |child| {
+        if (seg.len == 0) {
+            if (self.empty_child) |child| {
+                if (child.matchPath(allocator, rest, matches)) |leaf| {
+                    return leaf;
+                }
+            }
+        } else if (self.children.get(seg)) |child| {
             if (child.matchPath(allocator, rest, matches)) |leaf| {
                 return leaf;
             }
@@ -727,5 +733,26 @@ test "ServeMux matches long host > 256 bytes case-insensitively" {
     defer matches.deinit(allocator);
 
     const res = mux.matchTree(allocator, &long_host_upper, "GET", "/long", &matches);
+    try std.testing.expect(res != null);
+}
+
+test "ServeMux matches path with empty segment" {
+    const allocator = std.testing.allocator;
+    var mux = ServeMux.init(allocator);
+    defer mux.deinit();
+
+    const dummy = struct {
+        fn handle(w: *ResponseWriter, req: *Request) anyerror!void {
+            _ = w;
+            _ = req;
+        }
+    }.handle;
+
+    try mux.handleFunc("//foo", dummy);
+
+    var matches = std.ArrayListUnmanaged([]const u8).empty;
+    defer matches.deinit(allocator);
+
+    const res = mux.matchTree(allocator, null, "GET", "//foo", &matches);
     try std.testing.expect(res != null);
 }
