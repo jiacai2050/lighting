@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lighting Benchmark Report - {{DATE_STR}}</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --border: #334155;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent-zig: #f59e0b;
+            --accent-rust: #ef4444;
+            --accent-go: #06b6d4;
+            --highlight: #10b981;
+        }
+
+        @media (prefers-color-scheme: light) {
+            :root {
+                --bg: #f8fafc;
+                --surface: #ffffff;
+                --border: #e2e8f0;
+                --text-main: #0f172a;
+                --text-muted: #64748b;
+                --accent-zig: #d97706;
+                --accent-rust: #dc2626;
+                --accent-go: #0891b2;
+                --highlight: #059669;
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text-main);
+            padding: 2rem 1rem;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            margin-bottom: 2rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 1.5rem;
+        }
+
+        h1 {
+            font-size: 2.25rem;
+            font-weight: 800;
+            letter-spacing: -0.025em;
+            margin-bottom: 0.5rem;
+        }
+
+        .meta {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1.5rem;
+        }
+
+        .meta span strong {
+            color: var(--text-main);
+        }
+
+        .chart-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        @media (min-width: 900px) {
+            .chart-grid.two-col {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+
+        .chart-card {
+            background-color: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .chart-card h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 380px;
+            width: 100%;
+        }
+
+        .table-card {
+            background-color: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            overflow-x: auto;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .table-card h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.92rem;
+            text-align: left;
+        }
+
+        th, td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+
+        th {
+            background-color: rgba(255, 255, 255, 0.03);
+            font-weight: 600;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+
+        tbody tr:hover {
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.2rem 0.5rem;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .badge-zig { background: rgba(245, 158, 11, 0.15); color: var(--accent-zig); }
+        .badge-rust { background: rgba(239, 68, 68, 0.15); color: var(--accent-rust); }
+        .badge-go { background: rgba(6, 182, 212, 0.15); color: var(--accent-go); }
+
+        .cell-main {
+            font-weight: 600;
+        }
+
+        .cell-sub {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        footer {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⚡ Lighting Benchmark Report</h1>
+            <div class="meta">
+                <span><strong>Date:</strong> {{DATE_STR}}</span>
+                <span><strong>OS:</strong> {{OS}}</span>
+                {{KERNEL_META}}
+                <span><strong>Commit:</strong> {{COMMIT}}</span>
+                <span><strong>CPU:</strong> {{CPU}} ({{CORES_DESC}})</span>
+                <span><strong>Concurrency:</strong> {{CONCURRENCY}} ({{THREADS}} threads, {{DURATION}} per test)</span>
+            </div>
+        </header>
+
+        <!-- Charts Grid 1: Throughput Across All Routes -->
+        <div class="chart-card" style="margin-bottom: 2rem;">
+            <h2>🚀 Throughput Across All Routes (QPS, Higher is Better)</h2>
+            <div class="chart-container" style="height: 420px;">
+                <canvas id="throughputChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Charts Grid 2: Latencies Across All Routes -->
+        <div class="chart-grid two-col">
+            <div class="chart-card">
+                <h2>⚡ P50 Latency Across All Routes (µs, Lower is Better)</h2>
+                <div class="chart-container">
+                    <canvas id="p50Chart"></canvas>
+                </div>
+            </div>
+            <div class="chart-card">
+                <h2>⏱️ P99 Tail Latency Across All Routes (µs, Lower is Better)</h2>
+                <div class="chart-container">
+                    <canvas id="p99Chart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts Grid 3: System Resources Across All Routes -->
+        <div class="chart-grid two-col">
+            <div class="chart-card">
+                <h2>🖥️ CPU Utilization Across All Routes (% CPU, Lower is Better)</h2>
+                <div class="chart-container">
+                    <canvas id="cpuChart"></canvas>
+                </div>
+            </div>
+            <div class="chart-card">
+                <h2>💾 Peak Memory Usage Across All Routes (MB RSS, Lower is Better)</h2>
+                <div class="chart-container">
+                    <canvas id="memoryChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Table View -->
+        <div class="table-card">
+            <h2>📊 Detailed Benchmark Data (All Routes)</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Framework / Language</th>
+                        <th>GET /ping</th>
+                        <th>GET /users/{id}</th>
+                        <th>POST /echo</th>
+                        <th>GET /files/*</th>
+                    </tr>
+                </thead>
+                <tbody>
+{{TABLE_BODY}}
+                </tbody>
+            </table>
+        </div>
+
+        <footer>
+            Generated by Lighting Benchmark Suite • {{DATE_STR}}
+        </footer>
+    </div>
+
+    <script>
+        const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const textColor = isDark ? '#94a3b8' : '#64748b';
+        const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.06)';
+
+        Chart.defaults.color = textColor;
+        Chart.defaults.borderColor = gridColor;
+
+        // 1. Throughput Grouped Bar Chart
+        new Chart(document.getElementById('throughputChart'), {
+            type: 'bar',
+            data: {
+                labels: {{ROUTE_LABELS_JSON}},
+                datasets: {{THROUGHPUT_DATASETS_JSON}}
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top' },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => `${ctx.dataset.label}: ${Math.round(ctx.raw).toLocaleString()} req/s`
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            callback: (val) => (val / 1000).toLocaleString() + 'k'
+                        },
+                        title: {
+                            display: true,
+                            text: 'Requests per Second (QPS)'
+                        }
+                    }
+                }
+            }
+        });
+
+        // 2. P50 Latency Grouped Bar Chart
+        new Chart(document.getElementById('p50Chart'), {
+            type: 'bar',
+            data: {
+                labels: {{ROUTE_LABELS_JSON}},
+                datasets: {{P50_DATASETS_JSON}}
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top' },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => `${ctx.dataset.label}: ${ctx.raw.toLocaleString()} µs ${ctx.raw >= 1000 ? '(' + (ctx.raw / 1000).toFixed(2) + ' ms)' : ''}`
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: 'Microseconds (µs)'
+                        }
+                    }
+                }
+            }
+        });
+
+        // 3. P99 Tail Latency Grouped Bar Chart
+        new Chart(document.getElementById('p99Chart'), {
+            type: 'bar',
+            data: {
+                labels: {{ROUTE_LABELS_JSON}},
+                datasets: {{P99_DATASETS_JSON}}
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top' },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => `${ctx.dataset.label}: ${ctx.raw.toLocaleString()} µs ${ctx.raw >= 1000 ? '(' + (ctx.raw / 1000).toFixed(2) + ' ms)' : ''}`
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: 'Microseconds (µs)'
+                        }
+                    }
+                }
+            }
+        });
+
+        // 4. CPU Utilization Across All Routes (Grouped Bar Chart)
+        new Chart(document.getElementById('cpuChart'), {
+            type: 'bar',
+            data: {
+                labels: {{ROUTE_LABELS_JSON}},
+                datasets: {{CPU_DATASETS_JSON}}
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top' },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => `${ctx.dataset.label}: ${ctx.raw}% CPU`
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: 'CPU Usage (%)'
+                        }
+                    }
+                }
+            }
+        });
+
+        // 5. Peak RSS Memory Across All Routes (Grouped Bar Chart)
+        new Chart(document.getElementById('memoryChart'), {
+            type: 'bar',
+            data: {
+                labels: {{ROUTE_LABELS_JSON}},
+                datasets: {{MEMORY_DATASETS_JSON}}
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top' },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => `${ctx.dataset.label}: ${ctx.raw} MB`
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: 'Peak RSS (MB)'
+                        }
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>

@@ -8,12 +8,16 @@ import subprocess
 import platform
 import re
 import glob
+import json
+import threading
 from collections import defaultdict
 from datetime import datetime
 
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
+GITHUB_REPO_URL = "https://github.com/jiacai2050/lighting"
+
 PORT = int(os.environ.get("PORT", "8088"))
 THREADS = int(os.environ.get("THREADS", "4"))
 CONCURRENCY = int(os.environ.get("CONCURRENCY", "50"))
@@ -29,6 +33,8 @@ os.makedirs(REPORT_DIR, exist_ok=True)
 TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 REPORT_FILE = os.environ.get("REPORT_FILE", os.path.join(REPORT_DIR, f"benchmark_{TIMESTAMP}.md"))
 REPORT_LATEST = os.path.join(REPORT_DIR, "latest.md")
+REPORT_HTML = os.path.splitext(REPORT_FILE)[0] + ".html"
+REPORT_LATEST_HTML = os.path.join(REPORT_DIR, "latest.html")
 
 # -----------------------------------------------------------------------------
 # Prerequisites & CPU Isolation
@@ -297,12 +303,54 @@ def get_hardware_specs():
         except Exception:
             return "N/A"
 
+    def get_git_info():
+        try:
+            full_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=PROJECT_ROOT,
+                stderr=subprocess.DEVNULL,
+            ).decode().strip()
+            short_commit = full_commit[:7]
+            status = subprocess.check_output(
+                ["git", "status", "--porcelain"],
+                cwd=PROJECT_ROOT,
+                stderr=subprocess.DEVNULL,
+            ).decode().strip()
+            is_dirty = bool(status)
+
+            commit_url = f"{GITHUB_REPO_URL}/commit/{full_commit}"
+            return {
+                "full": full_commit,
+                "short": short_commit,
+                "dirty": is_dirty,
+                "url": commit_url,
+                "display": f"{short_commit} (dirty)" if is_dirty else short_commit,
+            }
+        except Exception:
+            return {
+                "full": "",
+                "short": "Unknown",
+                "dirty": False,
+                "url": "",
+                "display": "Unknown",
+            }
+
     zig_ver = get_tool_version(["zig", "version"], 0)
     go_ver = get_tool_version(["go", "version"], 2)
     rust_ver = get_tool_version(["rustc", "--version"], 1)
 
+    kernel_ver = platform.release()
+    if system == "Darwin":
+        kernel_ver = f"Darwin {platform.release()}"
+    elif system == "Windows":
+        kernel_ver = f"Windows NT {platform.version()}"
+
+    git_info = get_git_info()
     return {
         "os": os_name,
+        "kernel": kernel_ver,
+        "commit": git_info["display"],
+        "git": git_info,
         "cpu": cpu_model,
         "cores": str(cores),
         "cores_desc": cores_desc,
@@ -321,6 +369,9 @@ print("================================================================")
 print("           Lighting Benchmark Suite (Zig vs Go vs Rust)         ")
 print("================================================================")
 print(f"OS:          {SPECS['os']}")
+if SPECS.get("kernel"):
+    print(f"Kernel:      {SPECS['kernel']}")
+print(f"Commit:      {SPECS['commit']}")
 print(f"CPU:         {SPECS['cpu']} ({SPECS['cores_desc']})")
 print(f"RAM:         {SPECS['ram']}")
 print(f"Port:        {PORT}")
@@ -432,6 +483,55 @@ def run_wrk(url, duration, lua_script=None):
 
     return {"qps": qps, "p50": p50, "p99": p99}
 
+class ResourceSampler:
+    def __init__(self, pid, interval=0.1):
+        self.pid = pid
+        self.interval = interval
+        self.stop_event = threading.Event()
+        self.peak_rss = 0.0
+        self.thread = threading.Thread(target=self._monitor, daemon=True)
+
+    def _monitor(self):
+        while not self.stop_event.is_set():
+            rss = get_rss_mb(self.pid)
+            if rss > self.peak_rss:
+                self.peak_rss = rss
+            self.stop_event.wait(self.interval)
+
+    def start(self):
+        self.peak_rss = get_rss_mb(self.pid)
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        self.thread.join()
+        rss = get_rss_mb(self.pid)
+        if rss > self.peak_rss:
+            self.peak_rss = rss
+        return self.peak_rss
+
+def run_benchmark_case(proc_pid, url, duration, lua_script=None):
+    sampler = ResourceSampler(proc_pid)
+    sampler.start()
+    t_start = time.time()
+    c_start = get_cpu_time(proc_pid)
+
+    res = run_wrk(url, duration, lua_script=lua_script)
+
+    c_end = get_cpu_time(proc_pid)
+    t_end = time.time()
+    peak_rss = sampler.stop()
+
+    dt = t_end - t_start
+    dc = c_end - c_start
+    cpu_pct = round((dc / dt) * 100.0, 1) if dt > 0 else 0.0
+
+    res["cpu"] = f"{cpu_pct:.1f}%"
+    res["cpu_num"] = cpu_pct
+    res["rss"] = f"{peak_rss:.1f} MB"
+    res["rss_num"] = peak_rss
+    return res
+
 # -----------------------------------------------------------------------------
 # Benchmark Runner
 # -----------------------------------------------------------------------------
@@ -455,18 +555,6 @@ def bench_target(name, bin_path, env_extra=None):
     try:
         wait_ready(PORT)
 
-        # Measure idle metrics over 1s
-        t_idle_start = time.time()
-        c_idle_start = get_cpu_time(proc.pid)
-        time.sleep(1.0)
-        t_idle_end = time.time()
-        c_idle_end = get_cpu_time(proc.pid)
-
-        dt_idle = t_idle_end - t_idle_start
-        dc_idle = c_idle_end - c_idle_start
-        idle_cpu = f"{(dc_idle / dt_idle) * 100:.1f}%" if dt_idle > 0 else "0.0%"
-        idle_rss = get_rss_mb(proc.pid)
-
         # Warmup
         warmup_cmd = ["wrk", f"-t{THREADS}", f"-c{CONCURRENCY}", f"-d{WARMUP_DURATION}", "-H", "Connection: keep-alive", f"http://127.0.0.1:{PORT}/ping"]
         if CLIENT_CORES:
@@ -477,40 +565,27 @@ def bench_target(name, bin_path, env_extra=None):
             stderr=subprocess.DEVNULL,
         )
 
-        # Active load tracking
-        t_load_start = time.time()
-        c_load_start = get_cpu_time(proc.pid)
-
         # Case 1: GET /ping
         print("  [1/4] Running Case 1: GET /ping...")
-        res_ping = run_wrk(f"http://127.0.0.1:{PORT}/ping", DURATION)
+        res_ping = run_benchmark_case(proc.pid, f"http://127.0.0.1:{PORT}/ping", DURATION)
 
         # Case 2: GET /users/42
         print("  [2/4] Running Case 2: GET /users/42 (Dynamic Route & JSON)...")
-        res_user = run_wrk(f"http://127.0.0.1:{PORT}/users/42", DURATION)
+        res_user = run_benchmark_case(proc.pid, f"http://127.0.0.1:{PORT}/users/42", DURATION)
 
         # Case 3: POST /echo
         print("  [3/4] Running Case 3: POST /echo (1KB Body Read)...")
-        res_echo = run_wrk(f"http://127.0.0.1:{PORT}/echo", DURATION, lua_script=ECHO_LUA)
+        res_echo = run_benchmark_case(proc.pid, f"http://127.0.0.1:{PORT}/echo", DURATION, lua_script=ECHO_LUA)
 
         # Case 4: GET /files/static/css/theme/dark.min.css
         print("  [4/4] Running Case 4: GET /files/... (Wildcard Catch-all)...")
-        res_files = run_wrk(f"http://127.0.0.1:{PORT}/files/static/css/theme/dark.min.css", DURATION)
-
-        t_load_end = time.time()
-        c_load_end = get_cpu_time(proc.pid)
-        dt_load = t_load_end - t_load_start
-        dc_load = c_load_end - c_load_start
-        load_cpu = f"{(dc_load / dt_load) * 100:.1f}%" if dt_load > 0 else "0.0%"
-        peak_rss = get_rss_mb(proc.pid)
+        res_files = run_benchmark_case(proc.pid, f"http://127.0.0.1:{PORT}/files/static/css/theme/dark.min.css", DURATION)
 
         results[name] = {
             "ping": res_ping,
             "user": res_user,
             "echo": res_echo,
             "files": res_files,
-            "cpu": f"{idle_cpu} / {load_cpu}",
-            "rss": f"{idle_rss} MB / {peak_rss} MB",
         }
         print(f"  Completed {name}.\n")
 
@@ -538,17 +613,20 @@ if not ONLY_ZIG:
 # -----------------------------------------------------------------------------
 # Markdown Report Generation
 # -----------------------------------------------------------------------------
-table_header = "| Framework / Language | GET /ping (QPS / P50 / P99) | GET /users/{id} (QPS / P50 / P99) | POST /echo (QPS / P50 / P99) | GET /files/* (QPS / P50 / P99) | CPU (Idle / Load Avg) | Memory (Idle / Peak RSS) |"
-table_sep = "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
+table_header = "| Framework / Language | GET /ping | GET /users/{id} | POST /echo | GET /files/* |"
+table_sep = "| :--- | :--- | :--- | :--- | :--- |"
 table_rows = []
+
+def format_md_cell(r):
+    return f"{r['qps']} req/s (P50: {r['p50']}, P99: {r['p99']}, CPU: {r['cpu']}, RSS: {r['rss']})"
 
 for t in targets:
     d = results[t]
-    p = d["ping"]
-    u = d["user"]
-    e = d["echo"]
-    f = d["files"]
-    row = f"| **{t}** | {p['qps']} req/s ({p['p50']} / {p['p99']}) | {u['qps']} req/s ({u['p50']} / {u['p99']}) | {e['qps']} req/s ({e['p50']} / {e['p99']}) | {f['qps']} req/s ({f['p50']} / {f['p99']}) | {d['cpu']} | {d['rss']} |"
+    p_str = format_md_cell(d["ping"])
+    u_str = format_md_cell(d["user"])
+    e_str = format_md_cell(d["echo"])
+    f_str = format_md_cell(d["files"])
+    row = f"| **{t}** | {p_str} | {u_str} | {e_str} | {f_str} |"
     table_rows.append(row)
 
 pinning_note = ""
@@ -569,6 +647,15 @@ cpu_pinning_desc = (
     else "None (OS managed / unpinned)"
 )
 
+kernel_row = f"| **Kernel** | {SPECS['kernel']} |\n" if SPECS.get("kernel") else ""
+
+git_spec = SPECS.get("git", {})
+if git_spec.get("url"):
+    dirty_label = " (dirty)" if git_spec.get("dirty") else ""
+    commit_md = f"[{git_spec.get('short')}]({git_spec.get('url')}){dirty_label}"
+else:
+    commit_md = SPECS["commit"]
+
 markdown_content = f"""# Lighting Benchmark Report
 
 **Date**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -578,6 +665,7 @@ markdown_content = f"""# Lighting Benchmark Report
 | Item | Specification |
 | :--- | :--- |
 | **OS** | {SPECS['os']} |
+{kernel_row}| **Commit** | {commit_md} |
 | **CPU** | {SPECS['cpu']} ({SPECS['cores_desc']}) |
 | **RAM** | {SPECS['ram']} |
 | **Zig** | {SPECS['zig']} |
@@ -606,6 +694,192 @@ with open(REPORT_FILE, "w") as f:
 
 shutil.copyfile(REPORT_FILE, REPORT_LATEST)
 
+# -----------------------------------------------------------------------------
+# HTML Report Generation (with Interactive Charts)
+# -----------------------------------------------------------------------------
+def generate_html_report(results_map, target_list, specs, date_str):
+    def parse_float(val, default=0.0):
+        try:
+            cleaned = re.sub(r"[^\d.]", "", str(val))
+            return float(cleaned) if cleaned else default
+        except Exception:
+            return default
+
+    def parse_latency_us(val):
+        if not val:
+            return 0.0
+        val_str = str(val).strip().lower()
+        m = re.match(r"^([\d.]+)\s*(us|µs|ms|s)?", val_str)
+        if not m:
+            return 0.0
+        num = float(m.group(1))
+        unit = m.group(2) or "us"
+        if unit in ("us", "µs"):
+            return round(num, 1)
+        elif unit == "ms":
+            return round(num * 1000.0, 1)
+        elif unit == "s":
+            return round(num * 1000000.0, 1)
+        return round(num, 1)
+
+    def parse_peak_rss(val):
+        try:
+            parts = str(val).split("/")
+            target_part = parts[1] if len(parts) > 1 else parts[0]
+            cleaned = re.sub(r"[^\d.]", "", target_part)
+            return float(cleaned) if cleaned else 0.0
+        except Exception:
+            return 0.0
+
+    color_palette = {
+        "Zig_Lighting_zio": "#f59e0b",
+        "Zig_Lighting_std": "#fbbf24",
+        "Rust_actix_web": "#ef4444",
+        "Go_net_http": "#06b6d4",
+    }
+    fallback_colors = ["#f59e0b", "#ef4444", "#06b6d4", "#10b981", "#8b5cf6", "#ec4899"]
+
+    target_colors = [
+        color_palette.get(t, fallback_colors[i % len(fallback_colors)])
+        for i, t in enumerate(target_list)
+    ]
+
+    def parse_load_cpu(val):
+        try:
+            parts = str(val).split("/")
+            load_part = parts[1] if len(parts) > 1 else parts[0]
+            cleaned = re.sub(r"[^\d.]", "", load_part)
+            return float(cleaned) if cleaned else 0.0
+        except Exception:
+            return 0.0
+
+    # Datasets for Chart.js
+    route_labels = ["GET /ping", "GET /users/{id}", "POST /echo", "GET /files/*"]
+    route_keys = ["ping", "user", "echo", "files"]
+
+    throughput_datasets = []
+    p50_datasets = []
+    p99_datasets = []
+    cpu_datasets = []
+    memory_datasets = []
+
+    for i, t in enumerate(target_list):
+        d = results_map[t]
+        qps_data = [parse_float(d[rk]["qps"]) for rk in route_keys]
+        p50_data = [parse_latency_us(d[rk]["p50"]) for rk in route_keys]
+        p99_data = [parse_latency_us(d[rk]["p99"]) for rk in route_keys]
+        cpu_data = [d[rk].get("cpu_num", parse_float(d[rk].get("cpu", 0.0))) for rk in route_keys]
+        mem_data = [d[rk].get("rss_num", parse_float(d[rk].get("rss", 0.0))) for rk in route_keys]
+
+        throughput_datasets.append({
+            "label": t,
+            "data": qps_data,
+            "backgroundColor": target_colors[i],
+            "borderRadius": 6,
+        })
+        p50_datasets.append({
+            "label": t,
+            "data": p50_data,
+            "backgroundColor": target_colors[i],
+            "borderRadius": 6,
+        })
+        p99_datasets.append({
+            "label": t,
+            "data": p99_data,
+            "backgroundColor": target_colors[i],
+            "borderRadius": 6,
+        })
+        cpu_datasets.append({
+            "label": t,
+            "data": cpu_data,
+            "backgroundColor": target_colors[i],
+            "borderRadius": 6,
+        })
+        memory_datasets.append({
+            "label": t,
+            "data": mem_data,
+            "backgroundColor": target_colors[i],
+            "borderRadius": 6,
+        })
+
+    def format_html_cell(r):
+        return (
+            f'<div class="cell-main">{r["qps"]} req/s</div>'
+            f'<div class="cell-sub">P50: {r["p50"]} · P99: {r["p99"]}</div>'
+            f'<div class="cell-sub">CPU: {r["cpu"]} · RSS: {r["rss"]}</div>'
+        )
+
+    # Table rows
+    table_rows_html = []
+    for t in target_list:
+        d = results_map[t]
+        badge_cls = "badge-zig" if "Zig" in t else ("badge-rust" if "Rust" in t else "badge-go")
+        badge_name = "Zig" if "Zig" in t else ("Rust" if "Rust" in t else "Go")
+        row_html = f"""                    <tr>
+                        <td><span class="badge {badge_cls}">{badge_name}</span><br><strong>{t}</strong></td>
+                        <td>{format_html_cell(d['ping'])}</td>
+                        <td>{format_html_cell(d['user'])}</td>
+                        <td>{format_html_cell(d['echo'])}</td>
+                        <td>{format_html_cell(d['files'])}</td>
+                    </tr>"""
+        table_rows_html.append(row_html)
+    table_body = "\n".join(table_rows_html)
+
+    kernel_meta = f"<span><strong>Kernel:</strong> {specs['kernel']}</span>" if specs.get("kernel") else ""
+
+    git_info = specs.get("git", {})
+    if git_info.get("url"):
+        dirty_badge = ' <span style="color: var(--accent-zig); font-size: 0.85em;">(dirty)</span>' if git_info.get("dirty") else ""
+        commit_html = f'<a href="{git_info["url"]}" target="_blank" rel="noopener noreferrer" style="color: var(--highlight); text-decoration: none;"><code>{git_info["short"]}</code></a>{dirty_badge}'
+    else:
+        commit_html = f'<code>{specs["commit"]}</code>'
+
+    template_path = os.path.join(SCRIPT_DIR, "template.html")
+    if not os.path.exists(template_path):
+        print(f"Warning: HTML template not found at {template_path}, skipping HTML report.", file=sys.stderr)
+        return ""
+
+    with open(template_path, "r", encoding="utf-8") as f:
+        html = f.read()
+
+    context = {
+        "DATE_STR": date_str,
+        "OS": specs["os"],
+        "KERNEL_META": kernel_meta,
+        "COMMIT": commit_html,
+        "CPU": specs["cpu"],
+        "CORES_DESC": specs["cores_desc"],
+        "CONCURRENCY": str(CONCURRENCY),
+        "THREADS": str(THREADS),
+        "DURATION": str(DURATION),
+        "TABLE_BODY": table_body,
+        "ROUTE_LABELS_JSON": json.dumps(route_labels),
+        "TARGET_LIST_JSON": json.dumps(target_list),
+        "TARGET_COLORS_JSON": json.dumps(target_colors),
+        "THROUGHPUT_DATASETS_JSON": json.dumps(throughput_datasets),
+        "P50_DATASETS_JSON": json.dumps(p50_datasets),
+        "P99_DATASETS_JSON": json.dumps(p99_datasets),
+        "CPU_DATASETS_JSON": json.dumps(cpu_datasets),
+        "MEMORY_DATASETS_JSON": json.dumps(memory_datasets),
+    }
+
+    for key, val in context.items():
+        html = html.replace(f"{{{{{key}}}}}", str(val))
+
+    return html
+
+html_content = generate_html_report(
+    results,
+    targets,
+    SPECS,
+    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+)
+
+if html_content:
+    with open(REPORT_HTML, "w", encoding="utf-8") as f:
+        f.write(html_content)
+    shutil.copyfile(REPORT_HTML, REPORT_LATEST_HTML)
+
 print("================================================================================")
 print("                             Benchmark Results                                  ")
 print("================================================================================")
@@ -618,6 +892,8 @@ for row in table_rows:
     print(row)
 print("")
 print("Benchmark report saved to:")
-print(f"  - {REPORT_FILE}")
-print(f"  - {REPORT_LATEST}")
+print(f"  - Markdown: {REPORT_FILE}")
+print(f"  - Markdown (latest): {REPORT_LATEST}")
+print(f"  - HTML:     {REPORT_HTML}")
+print(f"  - HTML (latest):     {REPORT_LATEST_HTML}")
 print("")
