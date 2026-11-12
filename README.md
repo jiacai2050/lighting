@@ -7,6 +7,7 @@
 *Fast throughput, deterministic memory overhead, zero external dependencies.*
 
 [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://jiacai2050.github.io/lighting/)
+[![Discussions](https://img.shields.io/badge/Discussions-GitHub-blue.svg)](https://github.com/jiacai2050/lighting/discussions)
 [![Zig](https://img.shields.io/badge/Zig-0.17.0-orange.svg)](https://ziglang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
@@ -99,7 +100,13 @@ Automated comparative benchmark against Go (`net/http`) and Rust (`actix-web`) w
 * **Ultra-Low Memory**: Peak resident set size remains at just **6.8 MB** across 50 concurrent Keep-Alive connections via connection-scoped Arena reuse (`request_arena_retain_limit = 64KB`), 24% lower than Rust (9.0 MB) and 61% lower than Go (17.5 MB).
 * **Deterministic Core Isolation**: Leverages hardware-aware core pinning (`taskset -c 0-7` for server, `taskset -c 8-11` for `wrk`) to isolate server processing onto high-frequency Performance cores without scheduling migration noise or client contention.
 
-For full methodology, script details, see [here](bench/README.md).
+For complete methodology, runner scripts, and reproduction steps, see the [Benchmark Guide](bench/README.md).
+
+---
+
+## Community & Support
+
+Have questions, ideas, or feedback? Feel free to start a thread on [GitHub Discussions](https://github.com/jiacai2050/lighting/discussions)!
 
 ---
 

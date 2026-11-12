@@ -380,18 +380,23 @@ print(f"Concurrency: {CONCURRENCY}")
 print(f"Duration:    {DURATION} per test")
 print("================================================================\n")
 
-print("[1/3] Building Zig (Lighting - ReleaseFast in bench/zig)...")
+print("[1/4] Building Zig (Lighting - ReleaseFast in bench/zig)...")
 subprocess.check_call(["zig", "build", "-Doptimize=ReleaseFast"], cwd=os.path.join(PROJECT_ROOT, "bench", "zig"))
 ZIG_BIN = os.path.join(PROJECT_ROOT, "bench", "zig", "zig-out", "bin", "bench-server")
 
 GO_BIN = None
+GO_FASTHTTP_BIN = None
 RUST_BIN = None
 if not ONLY_ZIG:
-    print("[2/3] Building Go (net/http - Release in bench/go)...")
+    print("[2/4] Building Go (net/http - Release in bench/go)...")
     subprocess.check_call(["go", "build", '-ldflags=-s -w', "-o", "bench-go", "main.go"], cwd=os.path.join(PROJECT_ROOT, "bench", "go"))
     GO_BIN = os.path.join(PROJECT_ROOT, "bench", "go", "bench-go")
 
-    print("[3/3] Building Rust (actix-web - Release in bench/rust)...")
+    print("[3/4] Building Go (fasthttp - Release in bench/go-fasthttp)...")
+    subprocess.check_call(["go", "build", '-ldflags=-s -w', "-o", "bench-fasthttp", "main.go"], cwd=os.path.join(PROJECT_ROOT, "bench", "go-fasthttp"))
+    GO_FASTHTTP_BIN = os.path.join(PROJECT_ROOT, "bench", "go-fasthttp", "bench-fasthttp")
+
+    print("[4/4] Building Rust (actix-web - Release in bench/rust)...")
     subprocess.check_call(["cargo", "build", "--release"], cwd=os.path.join(PROJECT_ROOT, "bench", "rust"))
     RUST_BIN = os.path.join(PROJECT_ROOT, "bench", "rust", "target", "release", "lighting-bench-rust")
 
@@ -607,6 +612,9 @@ if not ONLY_ZIG:
     bench_target("Go_net_http", GO_BIN)
     targets.append("Go_net_http")
 
+    bench_target("Go_fasthttp", GO_FASTHTTP_BIN)
+    targets.append("Go_fasthttp")
+
     bench_target("Rust_actix_web", RUST_BIN)
     targets.append("Rust_actix_web")
 
@@ -736,6 +744,7 @@ def generate_html_report(results_map, target_list, specs, date_str):
         "Zig_Lighting_std": "#fbbf24",
         "Rust_actix_web": "#ef4444",
         "Go_net_http": "#06b6d4",
+        "Go_fasthttp": "#3b82f6",
     }
     fallback_colors = ["#f59e0b", "#ef4444", "#06b6d4", "#10b981", "#8b5cf6", "#ec4899"]
 

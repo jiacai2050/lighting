@@ -15,3 +15,9 @@ The documentation is organized into five specialized sections:
 * **[Internals](internals/architecture.md)**: In-depth technical analysis for systems engineers and contributors — exploring structured concurrency dispatch, zero-copy protocol parsing, decision-tree routing algorithms, arena allocators, and TigerStyle defensive invariants.
 * **[Cookbook](cookbook/hello.md)**: Real-world, end-to-end applications including REST APIs, SQLite with embedded SPAs, WebSocket chat servers, and command-line file servers.
 * **[Project & Evolution](design.md)**: Architecture design specifications, development workflow, and protocol milestones.
+
+---
+
+## Community & Support
+
+Have questions, suggestions, or need help integrating Lighting into your projects? Join the community and ask questions on [GitHub Discussions](https://github.com/jiacai2050/lighting/discussions).

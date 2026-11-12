@@ -31,6 +31,7 @@ __pycache__/
 *.pyc
 bench/rust/target/
 bench/go/bench-go
+bench/go-fasthttp/bench-fasthttp
 bench/zig/zig-out/
 bench/zig/.zig-cache/
 docs/apidocs/
