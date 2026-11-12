@@ -100,7 +100,7 @@ Automated comparative benchmark against Go (`net/http`) and Rust (`actix-web`) w
 * **Ultra-Low Memory**: Peak resident set size remains at just **6.8 MB** across 50 concurrent Keep-Alive connections via connection-scoped Arena reuse (`request_arena_retain_limit = 64KB`), 24% lower than Rust (9.0 MB) and 61% lower than Go (17.5 MB).
 * **Deterministic Core Isolation**: Leverages hardware-aware core pinning (`taskset -c 0-7` for server, `taskset -c 8-11` for `wrk`) to isolate server processing onto high-frequency Performance cores without scheduling migration noise or client contention.
 
-For complete methodology, runner scripts, and reproduction steps, see the [Benchmark Guide](bench/README.md).
+Interactive charts are available at the [Benchmark Report](https://jiacai2050.github.io/lighting/bench/latest.html). For complete methodology and runner scripts, see the [Benchmark Guide](bench/README.md).
 
 ---
 

@@ -43,6 +43,10 @@ docs: ## Build documentation with mdBook and Zig API docs
 	mdbook build
 	@mkdir -p book/apidocs
 	@cp -r zig-out/docs/* book/apidocs/
+	@if [ -f bench/report/latest.html ]; then \
+		mkdir -p book/bench; \
+		cp bench/report/latest.html book/bench/latest.html; \
+	fi
 
 docs-serve: ## Serve documentation locally with mdBook
 	mdbook serve --open

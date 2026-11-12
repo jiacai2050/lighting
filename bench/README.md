@@ -6,7 +6,10 @@ This directory contains comparative micro-benchmarks comparing **Lighting (Zig)*
    - `IO=zio` (default): powered by [`lalinsky/zio`](https://github.com/lalinsky/zio) asynchronous runtime with work-stealing executors.
    - `IO=std`: powered by Zig standard library `std.Io` and `std.Io.Group.concurrent`.
 2. **Go (`net/http`)**: Go 1.22+ standard library `http.NewServeMux` with native pattern matching (`{id}` and `{filepath...}`) and Goroutine-per-connection scheduling.
-3. **Rust (`actix-web`)**: Actix-web 4.x on Tokio multi-threaded runtime, representing one of the fastest web frameworks in the Rust ecosystem.
+3. **Go (`fasthttp`)**: Standalone build in `bench/go-fasthttp/` using [`valyala/fasthttp`](https://github.com/valyala/fasthttp), optimized for high throughput and minimal memory allocations.
+4. **Rust (`actix-web`)**: Actix-web 4.x on Tokio multi-threaded runtime, representing one of the fastest web frameworks in the Rust ecosystem.
+
+Interactive charts are available at [Benchmark Report](https://jiacai2050.github.io/lighting/bench/latest.html).
 
 ---
 
@@ -25,15 +28,16 @@ The suite evaluates four distinct workloads to measure both raw I/O throughput a
 
 ## Timeout Alignment Across Frameworks
 
-To guarantee an apples-to-apples comparison, connection and request timeout configurations are strictly harmonized across all three implementations:
+To guarantee an apples-to-apples comparison, connection and request timeout configurations are strictly harmonized across all implementations:
 
-| Timeout Dimension | Zig (Lighting) | Go (`net/http`) | Rust (`actix-web`) | Configured Value | Description |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Header Read Timeout** | `read_header_timeout_ns` | `ReadHeaderTimeout` | `client_request_timeout` | **5s** | Slowloris defense; maximum time window allowed for the client to complete sending HTTP request headers. |
-| **Connection Idle Timeout** | `idle_timeout_ns` | `IdleTimeout` | `keep_alive` | **120s** | Maximum idle duration to keep an inactive persistent Keep-Alive connection open before closing. |
+| Timeout Dimension | Zig (Lighting) | Go (`net/http`) | Go (`fasthttp`) | Rust (`actix-web`) | Configured Value | Description |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Header Read Timeout** | `read_header_timeout_ns` | `ReadHeaderTimeout` | `ReadTimeout` (full request)* | `client_request_timeout` | **5s** | Slowloris defense; maximum time window allowed for the client to complete sending HTTP request headers. |
+| **Connection Idle Timeout** | `idle_timeout_ns` | `IdleTimeout` | `IdleTimeout` | `keep_alive` | **120s** | Maximum idle duration to keep an inactive persistent Keep-Alive connection open before closing. |
 
 > [!NOTE]
-> **Why socket-level Read / Write timeouts are omitted**:
+> **Timeout Alignment Details & Framework Differences**:
+> - In **fasthttp**, there is no standalone `ReadHeaderTimeout`. Because `fasthttp` eagerly reads the entire incoming request (header + body) into pre-allocated memory pool buffers before calling the user handler, its `ReadTimeout` covers the full request transfer. In this benchmark (where payloads are <= 1KB), `ReadTimeout = 5s` provides equivalent Slowloris protection without distorting latency.
 > - In **Go** and **Zig**, `ReadTimeout` and `WriteTimeout` enforce deadlines directly at the physical socket transport layer (Layer 4), terminating connections when kernel socket buffers stall.
 > - In **Rust (actix-web / Tokio)**, the server operates on a purely asynchronous, non-blocking Future stream without socket-level write deadlines. While application-layer middleware (`wrap_fn`) can enforce a handler execution timeout, it completes as soon as `HttpResponse` is constructed and cannot track whether subsequent socket `writev` flushes are blocked by network congestion.
 > - Because application-layer Future timeouts and transport-layer socket deadlines are fundamentally asymmetrical, the benchmark aligns strictly on the two genuine transport-level lifecycles: **Header Read Timeout (5s)** and **Keep-Alive Idle Timeout (120s)**.
@@ -81,10 +85,16 @@ bench/
 ├── go/                        # Standalone Go 1.22+ net/http project
 │   ├── go.mod
 │   └── main.go
+├── go-fasthttp/               # Standalone Go fasthttp project
+│   ├── go.mod
+│   ├── go.sum
+│   └── main.go
 ├── rust/                      # Standalone Rust actix-web 4.x project
 │   ├── Cargo.toml
 │   └── src/
 │       └── main.rs
+├── report/                    # Generated benchmark reports and interactive HTML files
+│   └── latest.html
 ├── run.py                     # Automated benchmark runner and comparative report generator
 └── README.md                  # This documentation
 ```
@@ -150,7 +160,14 @@ go build -ldflags="-s -w" -o bench-go main.go
 PORT=8088 ./bench-go
 ```
 
-### 3. Rust (`actix-web`)
+### 3. Go (`fasthttp`)
+```bash
+cd bench/go-fasthttp
+go build -ldflags="-s -w" -o bench-fasthttp main.go
+PORT=8088 ./bench-fasthttp
+```
+
+### 4. Rust (`actix-web`)
 ```bash
 cd bench/rust
 cargo build --release

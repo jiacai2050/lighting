@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/valyala/fasthttp"
 )
@@ -61,6 +62,12 @@ func main() {
 		Name:               "lighting-bench-fasthttp",
 		ReadBufferSize:     8192,
 		WriteBufferSize:    8192,
+		// Timeout alignment note:
+		// Unlike net/http, Zig, and actix-web which support dedicated header-only read timeouts
+		// (ReadHeaderTimeout / client_request_timeout), fasthttp reads the entire request
+		// (header + body) upfront into memory. Thus, ReadTimeout covers both header and body reading.
+		ReadTimeout:        5 * time.Second,
+		IdleTimeout:        120 * time.Second,
 	}
 
 	log.Printf("Go (fasthttp) server listening on http://127.0.0.1:%s...", port)

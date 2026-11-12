@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lighting Benchmark Report - 2026-11-12 11:45:44</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --border: #334155;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent-zig: #f59e0b;
+            --accent-rust: #ef4444;
+            --accent-go: #06b6d4;
+            --highlight: #10b981;
+        }
+
+        @media (prefers-color-scheme: light) {
+            :root {
+                --bg: #f8fafc;
+                --surface: #ffffff;
+                --border: #e2e8f0;
+                --text-main: #0f172a;
+                --text-muted: #64748b;
+                --accent-zig: #d97706;
+                --accent-rust: #dc2626;
+                --accent-go: #0891b2;
+                --highlight: #059669;
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text-main);
+            padding: 2rem 1rem;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            margin-bottom: 2rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 1.5rem;
+        }
+
+        h1 {
+            font-size: 2.25rem;
+            font-weight: 800;
+            letter-spacing: -0.025em;
+            margin-bottom: 0.5rem;
+        }
+
+        .meta {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1.5rem;
+        }
+
+        .meta span strong {
+            color: var(--text-main);
+        }
+
+        .chart-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        @media (min-width: 900px) {
+            .chart-grid.two-col {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+
+        .chart-card {
+            background-color: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .chart-card h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 380px;
+            width: 100%;
+        }
+
+        .table-card {
+            background-color: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            overflow-x: auto;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .table-card h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.92rem;
+            text-align: left;
+        }
+
+        th, td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+
+        th {
+            background-color: rgba(255, 255, 255, 0.03);
+            font-weight: 600;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+
+        tbody tr:hover {
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.2rem 0.5rem;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .badge-zig { background: rgba(245, 158, 11, 0.15); color: var(--accent-zig); }
+        .badge-rust { background: rgba(239, 68, 68, 0.15); color: var(--accent-rust); }
+        .badge-go { background: rgba(6, 182, 212, 0.15); color: var(--accent-go); }
+
+        .cell-main {
+            font-weight: 600;
+        }
+
+        .cell-sub {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        footer {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⚡ Lighting Benchmark Report</h1>
+            <div class="meta">
+                <span><strong>Date:</strong> 2026-11-12 11:45:44</span>
+                <span><strong>OS:</strong> Ubuntu 24.04.3 LTS (x86_64)</span>
+                <span><strong>Kernel:</strong> 6.11.0-29-generic</span>
+                <span><strong>Commit:</strong> <a href="https://github.com/jiacai2050/lighting/commit/bbb10b111c256e5a82fa881f4eeffb9a4bfc299d" target="_blank" rel="noopener noreferrer" style="color: var(--highlight); text-decoration: none;"><code>bbb10b1</code></a></span>
+                <span><strong>CPU:</strong> 13th Gen Intel(R) Core(TM) i7-13700 (24 cores: 16 Performance + 8 Efficiency)</span>
+                <span><strong>Concurrency:</strong> 50 (4 threads, 10s per test)</span>
+            </div>
+        </header>
+
+        <!-- Charts Grid 1: Throughput Across All Routes -->
+        <div class="chart-card" style="margin-bottom: 2rem;">
+            <h2>🚀 Throughput Across All Routes (QPS, Higher is Better)</h2>
+            <div class="chart-container" style="height: 420px;">
+                <canvas id="throughputChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Charts Grid 2: Latencies Across All Routes -->
+        <div class="chart-grid two-col">
+            <div class="chart-card">
+                <h2>⚡ P50 Latency Across All Routes (µs, Lower is Better)</h2>
+                <div class="chart-container">
+                    <canvas id="p50Chart"></canvas>
+                </div>
+            </div>
+            <div class="chart-card">
+                <h2>⏱️ P99 Tail Latency Across All Routes (µs, Lower is Better)</h2>
+                <div class="chart-container">
+                    <canvas id="p99Chart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts Grid 3: System Resources Across All Routes -->
+        <div class="chart-grid two-col">
+            <div class="chart-card">
+                <h2>🖥️ CPU Utilization Across All Routes (% CPU, Lower is Better)</h2>
+                <div class="chart-container">
+                    <canvas id="cpuChart"></canvas>
+                </div>
+            </div>
+            <div class="chart-card">
+                <h2>💾 Peak Memory Usage Across All Routes (MB RSS, Lower is Better)</h2>
+                <div class="chart-container">
+                    <canvas id="memoryChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Table View -->
+        <div class="table-card">
+            <h2>📊 Detailed Benchmark Data (All Routes)</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Framework / Language</th>
+                        <th>GET /ping</th>
+                        <th>GET /users/{id}</th>
+                        <th>POST /echo</th>
+                        <th>GET /files/*</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="badge badge-zig">Zig</span><br><strong>Zig_Lighting_zio</strong></td>
+                        <td><div class="cell-main">652422.00 req/s</div><div class="cell-sub">P50: 38.00us · P99: 76.00us</div><div class="cell-sub">CPU: 385.0% · RSS: 7.6 MB</div></td>
+                        <td><div class="cell-main">647461.44 req/s</div><div class="cell-sub">P50: 38.00us · P99: 77.00us</div><div class="cell-sub">CPU: 404.7% · RSS: 7.6 MB</div></td>
+                        <td><div class="cell-main">601963.00 req/s</div><div class="cell-sub">P50: 41.00us · P99: 83.00us</div><div class="cell-sub">CPU: 394.8% · RSS: 7.8 MB</div></td>
+                        <td><div class="cell-main">639479.65 req/s</div><div class="cell-sub">P50: 38.00us · P99: 78.00us</div><div class="cell-sub">CPU: 394.9% · RSS: 7.8 MB</div></td>
+                    </tr>
+                    <tr>
+                        <td><span class="badge badge-zig">Zig</span><br><strong>Zig_Lighting_std</strong></td>
+                        <td><div class="cell-main">642828.35 req/s</div><div class="cell-sub">P50: 39.00us · P99: 78.00us</div><div class="cell-sub">CPU: 385.0% · RSS: 14.8 MB</div></td>
+                        <td><div class="cell-main">634712.72 req/s</div><div class="cell-sub">P50: 39.00us · P99: 78.00us</div><div class="cell-sub">CPU: 375.0% · RSS: 14.8 MB</div></td>
+                        <td><div class="cell-main">584490.66 req/s</div><div class="cell-sub">P50: 42.00us · P99: 85.00us</div><div class="cell-sub">CPU: 394.9% · RSS: 15.0 MB</div></td>
+                        <td><div class="cell-main">621023.53 req/s</div><div class="cell-sub">P50: 40.00us · P99: 82.00us</div><div class="cell-sub">CPU: 385.0% · RSS: 15.0 MB</div></td>
+                    </tr>
+                    <tr>
+                        <td><span class="badge badge-go">Go</span><br><strong>Go_net_http</strong></td>
+                        <td><div class="cell-main">480072.36 req/s</div><div class="cell-sub">P50: 60.00us · P99: 470.00us</div><div class="cell-sub">CPU: 888.2% · RSS: 16.3 MB</div></td>
+                        <td><div class="cell-main">460432.89 req/s</div><div class="cell-sub">P50: 66.00us · P99: 485.00us</div><div class="cell-sub">CPU: 898.3% · RSS: 16.1 MB</div></td>
+                        <td><div class="cell-main">240165.58 req/s</div><div class="cell-sub">P50: 161.00us · P99: 1.26ms</div><div class="cell-sub">CPU: 928.1% · RSS: 15.9 MB</div></td>
+                        <td><div class="cell-main">449818.21 req/s</div><div class="cell-sub">P50: 68.00us · P99: 494.00us</div><div class="cell-sub">CPU: 918.3% · RSS: 16.1 MB</div></td>
+                    </tr>
+                    <tr>
+                        <td><span class="badge badge-go">Go</span><br><strong>Go_fasthttp</strong></td>
+                        <td><div class="cell-main">606826.89 req/s</div><div class="cell-sub">P50: 41.00us · P99: 83.00us</div><div class="cell-sub">CPU: 621.8% · RSS: 8.8 MB</div></td>
+                        <td><div class="cell-main">600595.99 req/s</div><div class="cell-sub">P50: 41.00us · P99: 84.00us</div><div class="cell-sub">CPU: 670.9% · RSS: 15.4 MB</div></td>
+                        <td><div class="cell-main">565384.57 req/s</div><div class="cell-sub">P50: 44.00us · P99: 89.00us</div><div class="cell-sub">CPU: 602.3% · RSS: 15.3 MB</div></td>
+                        <td><div class="cell-main">598901.09 req/s</div><div class="cell-sub">P50: 41.00us · P99: 84.00us</div><div class="cell-sub">CPU: 671.4% · RSS: 15.4 MB</div></td>
+                    </tr>
+                    <tr>
+                        <td><span class="badge badge-rust">Rust</span><br><strong>Rust_actix_web</strong></td>
+                        <td><div class="cell-main">611815.10 req/s</div><div class="cell-sub">P50: 41.00us · P99: 82.00us</div><div class="cell-sub">CPU: 335.5% · RSS: 9.6 MB</div></td>
+                        <td><div class="cell-main">606007.27 req/s</div><div class="cell-sub">P50: 41.00us · P99: 83.00us</div><div class="cell-sub">CPU: 355.5% · RSS: 9.6 MB</div></td>
+                        <td><div class="cell-main">563419.94 req/s</div><div class="cell-sub">P50: 44.00us · P99: 89.00us</div><div class="cell-sub">CPU: 384.7% · RSS: 9.9 MB</div></td>
+                        <td><div class="cell-main">594217.82 req/s</div><div class="cell-sub">P50: 42.00us · P99: 88.00us</div><div class="cell-sub">CPU: 395.0% · RSS: 9.9 MB</div></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <footer>
+            Generated by Lighting Benchmark Suite • 2026-11-12 11:45:44
+        </footer>
+    </div>
+
+    <script>
+        const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const textColor = isDark ? '#94a3b8' : '#64748b';
+        const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.06)';
+
+        Chart.defaults.color = textColor;
+        Chart.defaults.borderColor = gridColor;
+
+        // 1. Throughput Grouped Bar Chart
+        new Chart(document.getElementById('throughputChart'), {
+            type: 'bar',
+            data: {
+                labels: ["GET /ping", "GET /users/{id}", "POST /echo", "GET /files/*"],
+                datasets: [{"label": "Zig_Lighting_zio", "data": [652422.0, 647461.44, 601963.0, 639479.65], "backgroundColor": "#f59e0b", "borderRadius": 6}, {"label": "Zig_Lighting_std", "data": [642828.35, 634712.72, 584490.66, 621023.53], "backgroundColor": "#fbbf24", "borderRadius": 6}, {"label": "Go_net_http", "data": [480072.36, 460432.89, 240165.58, 449818.21], "backgroundColor": "#06b6d4", "borderRadius": 6}, {"label": "Go_fasthttp", "data": [606826.89, 600595.99, 565384.57, 598901.09], "backgroundColor": "#3b82f6", "borderRadius": 6}, {"label": "Rust_actix_web", "data": [611815.1, 606007.27, 563419.94, 594217.82], "backgroundColor": "#ef4444", "borderRadius": 6}]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top' },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => `${ctx.dataset.label}: ${Math.round(ctx.raw).toLocaleString()} req/s`
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            callback: (val) => (val / 1000).toLocaleString() + 'k'
+                        },
+                        title: {
+                            display: true,
+                            text: 'Requests per Second (QPS)'
+                        }
+                    }
+                }
+            }
+        });
+
+        // 2. P50 Latency Grouped Bar Chart
+        new Chart(document.getElementById('p50Chart'), {
+            type: 'bar',
+            data: {
+                labels: ["GET /ping", "GET /users/{id}", "POST /echo", "GET /files/*"],
+                datasets: [{"label": "Zig_Lighting_zio", "data": [38.0, 38.0, 41.0, 38.0], "backgroundColor": "#f59e0b", "borderRadius": 6}, {"label": "Zig_Lighting_std", "data": [39.0, 39.0, 42.0, 40.0], "backgroundColor": "#fbbf24", "borderRadius": 6}, {"label": "Go_net_http", "data": [60.0, 66.0, 161.0, 68.0], "backgroundColor": "#06b6d4", "borderRadius": 6}, {"label": "Go_fasthttp", "data": [41.0, 41.0, 44.0, 41.0], "backgroundColor": "#3b82f6", "borderRadius": 6}, {"label": "Rust_actix_web", "data": [41.0, 41.0, 44.0, 42.0], "backgroundColor": "#ef4444", "borderRadius": 6}]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top' },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => `${ctx.dataset.label}: ${ctx.raw.toLocaleString()} µs ${ctx.raw >= 1000 ? '(' + (ctx.raw / 1000).toFixed(2) + ' ms)' : ''}`
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: 'Microseconds (µs)'
+                        }
+                    }
+                }
+            }
+        });
+
+        // 3. P99 Tail Latency Grouped Bar Chart
+        new Chart(document.getElementById('p99Chart'), {
+            type: 'bar',
+            data: {
+                labels: ["GET /ping", "GET /users/{id}", "POST /echo", "GET /files/*"],
+                datasets: [{"label": "Zig_Lighting_zio", "data": [76.0, 77.0, 83.0, 78.0], "backgroundColor": "#f59e0b", "borderRadius": 6}, {"label": "Zig_Lighting_std", "data": [78.0, 78.0, 85.0, 82.0], "backgroundColor": "#fbbf24", "borderRadius": 6}, {"label": "Go_net_http", "data": [470.0, 485.0, 1260.0, 494.0], "backgroundColor": "#06b6d4", "borderRadius": 6}, {"label": "Go_fasthttp", "data": [83.0, 84.0, 89.0, 84.0], "backgroundColor": "#3b82f6", "borderRadius": 6}, {"label": "Rust_actix_web", "data": [82.0, 83.0, 89.0, 88.0], "backgroundColor": "#ef4444", "borderRadius": 6}]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top' },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => `${ctx.dataset.label}: ${ctx.raw.toLocaleString()} µs ${ctx.raw >= 1000 ? '(' + (ctx.raw / 1000).toFixed(2) + ' ms)' : ''}`
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: 'Microseconds (µs)'
+                        }
+                    }
+                }
+            }
+        });
+
+        // 4. CPU Utilization Across All Routes (Grouped Bar Chart)
+        new Chart(document.getElementById('cpuChart'), {
+            type: 'bar',
+            data: {
+                labels: ["GET /ping", "GET /users/{id}", "POST /echo", "GET /files/*"],
+                datasets: [{"label": "Zig_Lighting_zio", "data": [385.0, 404.7, 394.8, 394.9], "backgroundColor": "#f59e0b", "borderRadius": 6}, {"label": "Zig_Lighting_std", "data": [385.0, 375.0, 394.9, 385.0], "backgroundColor": "#fbbf24", "borderRadius": 6}, {"label": "Go_net_http", "data": [888.2, 898.3, 928.1, 918.3], "backgroundColor": "#06b6d4", "borderRadius": 6}, {"label": "Go_fasthttp", "data": [621.8, 670.9, 602.3, 671.4], "backgroundColor": "#3b82f6", "borderRadius": 6}, {"label": "Rust_actix_web", "data": [335.5, 355.5, 384.7, 395.0], "backgroundColor": "#ef4444", "borderRadius": 6}]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top' },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => `${ctx.dataset.label}: ${ctx.raw}% CPU`
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: 'CPU Usage (%)'
+                        }
+                    }
+                }
+            }
+        });
+
+        // 5. Peak RSS Memory Across All Routes (Grouped Bar Chart)
+        new Chart(document.getElementById('memoryChart'), {
+            type: 'bar',
+            data: {
+                labels: ["GET /ping", "GET /users/{id}", "POST /echo", "GET /files/*"],
+                datasets: [{"label": "Zig_Lighting_zio", "data": [7.6, 7.6, 7.8, 7.8], "backgroundColor": "#f59e0b", "borderRadius": 6}, {"label": "Zig_Lighting_std", "data": [14.8, 14.8, 15.0, 15.0], "backgroundColor": "#fbbf24", "borderRadius": 6}, {"label": "Go_net_http", "data": [16.3, 16.1, 15.9, 16.1], "backgroundColor": "#06b6d4", "borderRadius": 6}, {"label": "Go_fasthttp", "data": [8.8, 15.4, 15.3, 15.4], "backgroundColor": "#3b82f6", "borderRadius": 6}, {"label": "Rust_actix_web", "data": [9.6, 9.6, 9.9, 9.9], "backgroundColor": "#ef4444", "borderRadius": 6}]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top' },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => `${ctx.dataset.label}: ${ctx.raw} MB`
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: 'Peak RSS (MB)'
+                        }
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
